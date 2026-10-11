@@ -584,7 +584,7 @@ fn follow_orphans(inner: &Shared) {
                 let Some(st) = status.get_or_insert_with(|| core_status().ok()).clone() else { continue };
                 let open = matches!(st["state"].as_str(), Some("syncing" | "ready")) && st["network"] == net.as_str() && st["group"] == group.as_str();
                 let (history, readable) = match (open && !txid.is_empty()).then(|| history_of(&[txid.as_str()])) {
-                    Some(Some(h)) => (h.get(&txid).copied(), true),
+                    Some(Some(h)) => (h.get(&txid).cloned(), true),
                     Some(None) => (None, false),
                     None => (Some(Seen::Absent), true),
                 };
@@ -616,7 +616,7 @@ fn follow_confirmations(inner: &Shared, status: &Value) {
     let txids: Vec<&str> = unsettled.iter().map(|(_, t)| t.as_str()).collect();
     let Some(seen) = history_of(&txids) else { return };
     for (id, txid) in &unsettled {
-        let st = seen.get(txid).and_then(|s| lock(inner).sends.upgrade(id, *s));
+        let st = seen.get(txid).and_then(|s| lock(inner).sends.upgrade(id, s));
         emit_changed(id, st);
     }
 }

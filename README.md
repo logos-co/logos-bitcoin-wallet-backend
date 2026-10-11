@@ -87,14 +87,15 @@ wallet open, in the core.
 - Sends are kept in `sends.json`, which holds no receipt, key or password. After a restart an
   open send is reconciled with the core: a preview still awaiting approval is followed, one built
   but never signed is signed, and one the core no longer has is settled from the wallet's history.
-  The core's own send record comes first: `sendState` `confirmed`, `sent` or `replaced` means the
-  core broadcast it, and the send is `sent` at once, with no wait for a source (Kyoto reports no
-  mempool). Then a block or a source vouching for it is `sent`; a core without send records waits
-  30 s for a source, then `unknown`; one seen broadcasting that the history lacks is `unknown`;
-  otherwise `failed` with `backend_restarted`. A send settled this way moves to `sent` later once
-  the history shows the record, a source or, if abandoned, a block. Settled from the record alone
-  it shows no `broadcast` or `via`: history rows don't carry the outcome, so a core `unknown`
-  missed during a restart reads `sent`.
+  The core's own send record comes first, as its answer would have: a row's `broadcast` `seen` or
+  `requested` is `sent`, with `broadcast` and `via` filled in, at once (Kyoto reports no mempool to
+  wait for); `unknown` stays `unknown`, with its offer. A core whose rows name no outcome is
+  believed on `sendState` `sent` or `replaced`. Then a block or a source vouching for it is `sent`;
+  a core without send records waits 30 s for a source, then `unknown`; one seen broadcasting that
+  the history lacks is `unknown`; otherwise `failed` with `backend_restarted`.
+- An `unknown` send, or one a restart settled, moves to `sent` once the history shows it confirmed
+  on the authority's chain. The record or a source does that too, unless the core said `unknown`
+  or the send was abandoned.
 - `cancel_send` (the requester or a custodian) withdraws the approval request and unlocks the
   inputs. It is refused once the transaction is going out, and `close_wallet` withdraws open
   sends first.

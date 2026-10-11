@@ -128,7 +128,7 @@ pub enum Next {
 }
 
 /// What the core says about a send this backend instance has no job for (one it loaded).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CoreView<'a> {
     /// The core still holds the preview, in this state.
     Preview { state: &'a str, handle: Option<&'a str> },
@@ -137,28 +137,59 @@ pub enum CoreView<'a> {
     Gone { wallet_open: bool, history: Option<Seen>, readable: bool },
 }
 
+/// How the core's send record says the broadcast went: seen, requested or unknown, and the route.
+/// Both empty from a core that doesn't say.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Outcome {
+    pub broadcast: String,
+    pub via: String,
+}
+
 /// What the wallet's history says about a txid: absent; present but unreported; vouched for by a
 /// source or a block; broadcast by the core's own send record; confirmed on the authority's chain.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Seen {
     Absent,
     Unreported,
     Vouched,
-    Recorded,
-    Confirmed,
+    Recorded(Outcome),
+    Confirmed(Outcome),
 }
 
-/// Reads a history row: the core's own record and the authority's chain before any source.
+/// Reads a history row: the authority's chain, then the core's record when it names the outcome.
 pub fn seen_in(row: &Value) -> Seen {
     let record = row["sendState"].as_str().unwrap_or_default();
+    let text = |k: &str| row[k].as_str().unwrap_or_default().to_string();
+    let outcome = Outcome { broadcast: text("broadcast"), via: text("via") };
+    let went_out = matches!(record, "sent" | "replaced");
     if record == "confirmed" || row["state"] == "confirmed" {
-        Seen::Confirmed
+        Seen::Confirmed(outcome)
+    } else if went_out && !outcome.broadcast.is_empty() {
+        Seen::Recorded(outcome)
     } else if row["confirmations"].as_u64().unwrap_or(0) > 0 || !row["reportedBy"].is_null() {
         Seen::Vouched
-    } else if matches!(record, "sent" | "replaced") {
-        Seen::Recorded
+    } else if went_out {
+        Seen::Recorded(outcome)
     } else {
         Seen::Unreported
+    }
+}
+
+/// Seen or requested left; unknown may have. Empty: a core that doesn't say, whose record is believed.
+fn left(o: &Outcome) -> bool {
+    matches!(o.broadcast.as_str(), "" | "seen" | "requested")
+}
+
+/// Takes the core's outcome and route. Confirmed, an outcome short of seen or requested reads seen.
+fn fill(s: &mut Send, o: &Outcome, confirmed: bool) {
+    if !o.broadcast.is_empty() {
+        s.broadcast = o.broadcast.clone();
+    }
+    if confirmed && !matches!(s.broadcast.as_str(), "seen" | "requested") {
+        s.broadcast = "seen".into();
+    }
+    if !o.via.is_empty() {
+        s.via = o.via.clone();
     }
 }
 
@@ -524,12 +555,19 @@ impl Sends {
                 let s = self.get_mut(id).expect("present");
                 let settled = match (wallet_open, history) {
                     (true, None) | (true, Some(_)) if !readable => return (None, Next::Nothing),
-                    (true, Some(Seen::Confirmed | Seen::Vouched)) => {
+                    (true, Some(Seen::Confirmed(o))) => {
+                        fill(s, &o, true);
+                        Some((State::Sent, String::new(), String::new()))
+                    }
+                    // The core's record decides, as its answer would have: Kyoto reports nothing to wait for.
+                    (true, Some(Seen::Recorded(o))) => {
+                        fill(s, &o, false);
+                        Some(if left(&o) { (State::Sent, String::new(), String::new()) } else { (State::Unknown, MAY_HAVE_LEFT.to_string(), String::new()) })
+                    }
+                    (true, Some(Seen::Vouched)) => {
                         s.broadcast = "seen".into();
                         Some((State::Sent, String::new(), String::new()))
                     }
-                    // The core recorded its own broadcast: sent, as its answer would have said. Kyoto reports nothing.
-                    (true, Some(Seen::Recorded)) => Some((State::Sent, String::new(), String::new())),
                     // A core without send records: a source must report it.
                     (true, Some(Seen::Unreported)) => {
                         let since = *s.unreported_since.get_or_insert(now);
@@ -573,21 +611,25 @@ impl Sends {
             .collect()
     }
 
-    /// Confirmed is sent, whatever the send read before. A reconciled, unabandoned send is sent once the
-    /// core's record or a source vouches for it too; an unknown the core reported waits for a block.
-    pub fn upgrade(&mut self, id: &str, seen: Seen) -> Option<State> {
+    /// Confirmed is sent, whatever the send read before. The core's record or a source makes it sent
+    /// too, unless the core said unknown or the send was abandoned: those wait for a block.
+    pub fn upgrade(&mut self, id: &str, seen: &Seen) -> Option<State> {
         let s = self.map.get(&num(id)?).filter(|s| s.state.is_final() && s.state != State::Sent)?;
+        let believed = !s.abandoned && s.broadcast != "unknown";
         let sent = match seen {
-            Seen::Confirmed => true,
-            Seen::Recorded | Seen::Vouched => s.reconciled && !s.abandoned,
+            Seen::Confirmed(_) => true,
+            Seen::Recorded(o) => believed && left(o),
+            Seen::Vouched => believed,
             Seen::Absent | Seen::Unreported => false,
         };
         if !sent {
             return None;
         }
         let s = self.get_mut(id)?;
-        if seen != Seen::Recorded {
-            s.broadcast = "seen".into();
+        match seen {
+            Seen::Confirmed(o) => fill(s, o, true),
+            Seen::Recorded(o) => fill(s, o, false),
+            _ => s.broadcast = "seen".into(),
         }
         Self::settle(s, State::Sent, String::new(), String::new())
     }
@@ -875,6 +917,10 @@ mod tests {
         id
     }
 
+    fn told(broadcast: &str, via: &str) -> Outcome {
+        Outcome { broadcast: broadcast.into(), via: via.into() }
+    }
+
     /// The same sends, as a restarted backend loads them.
     fn reloaded(s: &Sends) -> Sends {
         let text = s.to_json().to_string();
@@ -1147,10 +1193,10 @@ mod tests {
         let id = started(&mut s);
         s.observe(&id, "awaiting_approval", Some("smh_1"), now);
         let g = |open, h, readable| CoreView::Gone { wallet_open: open, history: h, readable };
-        // The core's record says it broadcast it, or the chain has it: sent at once.
-        for seen in [Seen::Recorded, Seen::Confirmed, Seen::Vouched] {
+        // The core's record says it went out, or the chain has it: sent at once.
+        for seen in [Seen::Recorded(told("requested", "kyoto")), Seen::Recorded(Outcome::default()), Seen::Confirmed(Outcome::default()), Seen::Vouched] {
             let mut r = reloaded(&s);
-            assert_eq!(r.reconcile(&id, g(true, Some(seen), true), now).0, Some(State::Sent), "{seen:?}");
+            assert_eq!(r.reconcile(&id, g(true, Some(seen.clone()), true), now).0, Some(State::Sent), "{seen:?}");
             assert!(r.get(&id).unwrap().reconciled);
         }
         // A core without send records, and no source reports it: wait for one, then unknown.
@@ -1192,14 +1238,31 @@ mod tests {
     #[test]
     fn history_rows_are_read_core_record_first() {
         let seen = |v: Value| seen_in(&v);
-        assert_eq!(seen(json!({"state": "confirmed", "confirmations": 3, "sendState": "sent"})), Seen::Confirmed);
-        assert_eq!(seen(json!({"state": "sent", "confirmations": 0, "sendState": "confirmed"})), Seen::Confirmed);
-        assert_eq!(seen(json!({"state": "confirmed", "confirmations": 1, "sendState": "abandoned"})), Seen::Confirmed, "it confirmed anyway");
+        let none = Outcome::default();
+        assert_eq!(
+            seen(json!({"state": "confirmed", "confirmations": 3, "sendState": "sent", "broadcast": "requested", "via": "kyoto"})),
+            Seen::Confirmed(told("requested", "kyoto"))
+        );
+        assert_eq!(seen(json!({"state": "sent", "confirmations": 0, "sendState": "confirmed"})), Seen::Confirmed(none.clone()));
+        assert_eq!(
+            seen(json!({"state": "confirmed", "confirmations": 1, "sendState": "abandoned", "broadcast": "unknown", "via": "kyoto"})),
+            Seen::Confirmed(told("unknown", "kyoto")),
+            "it confirmed anyway"
+        );
+        assert_eq!(
+            seen(json!({"state": "sent", "confirmations": 0, "reportedBy": null, "sendState": "sent", "broadcast": "requested", "via": "kyoto"})),
+            Seen::Recorded(told("requested", "kyoto"))
+        );
+        assert_eq!(
+            seen(json!({"state": "sent", "confirmations": 0, "reportedBy": ["electrum-0"], "sendState": "sent", "broadcast": "unknown", "via": "electrum-1"})),
+            Seen::Recorded(told("unknown", "electrum-1")),
+            "the core's word over a source's"
+        );
         assert_eq!(seen(json!({"state": "waiting", "confirmations": 1, "sendState": "sent"})), Seen::Vouched, "above the authority's tip: a server's word");
         assert_eq!(seen(json!({"state": "sent", "confirmations": 0, "reportedBy": ["electrum-0"], "sendState": "sent"})), Seen::Vouched);
-        assert_eq!(seen(json!({"state": "sent", "confirmations": 0, "reportedBy": null, "sendState": "sent"})), Seen::Recorded);
-        assert_eq!(seen(json!({"state": "replaced", "confirmations": 0, "sendState": "replaced"})), Seen::Recorded);
-        assert_eq!(seen(json!({"state": "sent", "confirmations": 0, "sendState": "broadcasting"})), Seen::Unreported, "the core can't tell either");
+        assert_eq!(seen(json!({"state": "sent", "confirmations": 0, "reportedBy": null, "sendState": "sent"})), Seen::Recorded(none.clone()), "a core that names no outcome");
+        assert_eq!(seen(json!({"state": "replaced", "confirmations": 0, "sendState": "replaced"})), Seen::Recorded(none));
+        assert_eq!(seen(json!({"state": "sent", "confirmations": 0, "sendState": "broadcasting", "broadcast": null})), Seen::Unreported, "the core can't tell either");
         assert_eq!(seen(json!({"state": "sent", "confirmations": 0})), Seen::Unreported, "a core without send records");
     }
 
@@ -1213,12 +1276,35 @@ mod tests {
         let mut r = reloaded(&s);
         assert_eq!(r.reconcile(&id, CoreView::Preview { state: "awaiting_approval:rendered", handle: Some("smh_1") }, now), (None, Next::Nothing));
         assert_eq!(r.reconcile(&id, CoreView::Preview { state: "broadcasting", handle: None }, now).0, Some(State::Committing));
-        let row = json!({"txid": "ab".repeat(32), "state": "sent", "confirmations": 0, "reportedBy": null, "sendState": "sent"});
+        let row = json!({"txid": "ab".repeat(32), "state": "sent", "confirmations": 0, "reportedBy": null, "sendState": "sent",
+                         "broadcast": "requested", "via": "kyoto"});
         let gone = CoreView::Gone { wallet_open: true, history: Some(seen_in(&row)), readable: true };
         assert_eq!(r.reconcile(&id, gone, now).0, Some(State::Sent), "no wait for a source");
         let st = r.status_json(&id);
         assert_eq!((st["state"].clone(), st["error"].clone(), st["errorCode"].clone()), (json!("sent"), Value::Null, Value::Null));
+        assert_eq!((st["broadcast"].clone(), st["via"].clone()), (json!("requested"), json!("kyoto")));
         assert!(r.unsettled("regtest", "g_1").is_empty());
+    }
+
+    #[test]
+    fn a_restart_keeps_an_unknown_broadcast_unknown() {
+        let now = Instant::now();
+        let mut s = Sends::default();
+        let id = started(&mut s);
+        s.observe(&id, "awaiting_approval", Some("smh_1"), now);
+        let mut r = reloaded(&s);
+        let row = json!({"state": "sent", "confirmations": 0, "reportedBy": ["electrum-0"], "sendState": "sent", "broadcast": "unknown", "via": "electrum-1"});
+        let gone = CoreView::Gone { wallet_open: true, history: Some(seen_in(&row)), readable: true };
+        assert_eq!(r.reconcile(&id, gone, now).0, Some(State::Unknown), "as the core's answer would have been");
+        let st = r.status_json(&id);
+        assert_eq!((st["broadcast"].clone(), st["via"].clone()), (json!("unknown"), json!("electrum-1")));
+        assert_eq!(st["offer"], json!(["rebroadcast", "request_fee_bump", "abandon_send"]));
+        // Neither its record nor a source settles it later; a block does.
+        assert_eq!(r.upgrade(&id, &seen_in(&row)), None);
+        assert_eq!(r.upgrade(&id, &Seen::Vouched), None);
+        let mined = json!({"state": "confirmed", "confirmations": 1, "sendState": "confirmed", "broadcast": "unknown", "via": "electrum-1"});
+        assert_eq!(r.upgrade(&id, &seen_in(&mined)), Some(State::Sent));
+        assert_eq!(r.status_json(&id)["broadcast"], "seen");
     }
 
     #[test]
@@ -1230,10 +1316,10 @@ mod tests {
         assert_eq!(s.unsettled("regtest", "g_1"), vec![(id.clone(), ab.clone())]);
         assert!(s.unsettled("regtest", "g_2").is_empty(), "another wallet's history says nothing of it");
         // The core said unknown: neither its record nor a source settles that, only the chain.
-        for seen in [Seen::Absent, Seen::Unreported, Seen::Recorded, Seen::Vouched] {
-            assert_eq!(s.upgrade(&id, seen), None, "{seen:?}");
+        for seen in [Seen::Absent, Seen::Unreported, Seen::Recorded(told("unknown", "kyoto")), Seen::Recorded(Outcome::default()), Seen::Vouched] {
+            assert_eq!(s.upgrade(&id, &seen), None, "{seen:?}");
         }
-        assert_eq!(s.upgrade(&id, Seen::Confirmed), Some(State::Sent));
+        assert_eq!(s.upgrade(&id, &Seen::Confirmed(told("unknown", "kyoto"))), Some(State::Sent));
         let st = s.status_json(&id);
         assert_eq!((st["state"].clone(), st["error"].clone(), st["broadcast"].clone()), (json!("sent"), Value::Null, json!("seen")));
         assert!(st.get("offer").is_none() && s.unsettled("regtest", "g_1").is_empty());
@@ -1242,7 +1328,14 @@ mod tests {
         let id = started(&mut s);
         s.signed(&id, &json!({"txid": ab, "broadcast": "unknown"}));
         s.abandoned(&id);
-        assert_eq!(s.upgrade(&id, Seen::Confirmed), Some(State::Sent));
+        assert_eq!(s.upgrade(&id, &Seen::Recorded(told("requested", "kyoto"))), None, "given up: only a block says otherwise");
+        assert_eq!(s.upgrade(&id, &Seen::Confirmed(Outcome::default())), Some(State::Sent));
+        // The core stopped answering mid-commit: its record says how it went.
+        let mut s = Sends::default();
+        let id = started(&mut s);
+        s.observe(&id, "broadcasting", None, Instant::now());
+        assert_eq!(s.core_lost(&id), Some(State::Unknown));
+        assert_eq!(s.upgrade(&id, &Seen::Recorded(told("requested", "kyoto"))), Some(State::Sent));
         // Settled unknown by a restart while its wallet was closed: the core's record decides once it is open.
         let now = Instant::now();
         let mut s = Sends::default();
@@ -1252,12 +1345,14 @@ mod tests {
         assert_eq!(r.reconcile(&id, CoreView::Gone { wallet_open: false, history: None, readable: true }, now).0, Some(State::Unknown));
         let mut r = reloaded(&r);
         assert_eq!(r.unsettled("regtest", "g_1").len(), 1, "it survives another restart");
-        assert_eq!(r.upgrade(&id, Seen::Unreported), None);
-        assert_eq!(r.upgrade(&id, Seen::Recorded), Some(State::Sent));
+        assert_eq!(r.upgrade(&id, &Seen::Unreported), None);
+        assert_eq!(r.upgrade(&id, &Seen::Recorded(told("unknown", "kyoto"))), None, "the core says unknown");
+        assert_eq!(r.upgrade(&id, &Seen::Recorded(told("requested", "kyoto"))), Some(State::Sent));
+        assert_eq!(r.status_json(&id)["via"], "kyoto");
         // Failed by a restart, then confirmed: it went out after all.
         let mut r = reloaded(&s);
         assert_eq!(r.reconcile(&id, CoreView::Gone { wallet_open: true, history: Some(Seen::Absent), readable: true }, now).0, Some(State::Failed));
-        assert_eq!(r.upgrade(&id, Seen::Confirmed), Some(State::Sent));
+        assert_eq!(r.upgrade(&id, &Seen::Confirmed(Outcome::default())), Some(State::Sent));
         // A failure the core reported is not followed, nor a send whose txid a newer send took.
         let mut s = Sends::default();
         let id = started(&mut s);
