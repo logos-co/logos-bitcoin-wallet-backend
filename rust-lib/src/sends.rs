@@ -546,11 +546,13 @@ impl Sends {
             .collect()
     }
 
-    /// Open sends with a preview, and the outpoints they spend.
+    /// Open sends with a preview, and the outpoints they spend. Not fee bumps: they spend the coins of
+    /// the unconfirmed send they replace, never among the wallet's coins; if it confirms, broadcast refuses.
     pub fn watched_inputs(&self) -> Vec<(String, Vec<String>)> {
         self.map
             .values()
             .filter(|s| matches!(s.state, State::Preparing | State::AwaitingApproval) && s.withdrawal.is_none() && !s.preview_id.is_empty())
+            .filter(|s| s.kind != Kind::FeeBump)
             .map(|s| (s.id.clone(), inputs_of(&s.preview)))
             .collect()
     }
@@ -1013,6 +1015,17 @@ mod tests {
         assert!(s.watched_inputs().is_empty());
         assert_eq!(s.sign_failed(&id, "cancelled", Some("cancelled")).0, Some(State::Failed));
         assert_eq!(s.get(&id).unwrap().error_code, "coins_changed");
+    }
+
+    #[test]
+    fn a_fee_bump_is_not_withdrawn_for_spending_the_send_it_replaces() {
+        let mut s = Sends::default();
+        let id = s.begin(Kind::FeeBump, "bitcoin_wallet_ui", "regtest", "g_1", json!({"txid": "ab".repeat(32)}), 1).unwrap();
+        s.set_build_job(&id, "b1");
+        assert_eq!(s.built(&id, preview("p1")), Next::Sign("p1".into()));
+        s.set_sign_job(&id, "b2");
+        s.observe(&id, "awaiting_approval", None, Instant::now());
+        assert!(s.watched_inputs().is_empty(), "its inputs are spent by the unconfirmed original, by design");
     }
 
     #[test]
