@@ -142,6 +142,7 @@ pub const CUSTODIAN_METHODS: &[&str] = &[
     "set_proxy",
     "clear_suspect",
     "rebroadcast",
+    "abandon_send",
 ];
 
 /// Any named module may ask for a send; the person approves it in the signer app.

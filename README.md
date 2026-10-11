@@ -14,7 +14,7 @@ One role, the custodian set, defaults to `bitcoin_wallet_ui`. There is no approv
 
 | Who | Methods |
 |---|---|
-| custodian | `configure`, `set_active_network`, `open_wallet`, `close_wallet`, `descriptors`, `set_sources`, `set_source`, `set_proxy`, `clear_suspect`, `rebroadcast` |
+| custodian | `configure`, `set_active_network`, `open_wallet`, `close_wallet`, `descriptors`, `set_sources`, `set_source`, `set_proxy`, `clear_suspect`, `rebroadcast`, `abandon_send` |
 | any named module | `request_send`, `request_fee_bump`, and `cancel_send` for its own request |
 | anyone | every read: `caller_identity`, `list_networks`, `list_wallets`, `job_status`, `wallet_status`, `balances`, `history`, `receive_address`, `fee_rates`, `address_valid`, `format_btc`, `parse_btc`, `sources`, `source_health`, `exposure`, `send_status`, `list_sends` |
 
@@ -65,9 +65,20 @@ wallet open, in the core.
   signer shows it, the person has no timeout.
 - If an input leaves the wallet's confirmed coins while the send waits, the backend withdraws
   it and fails it.
-- `unknown` means the transaction may have left. `send_status` offers `rebroadcast` and
-  `request_fee_bump`; never a new send from other coins while it could still confirm. A
-  rebroadcast the network has seen moves it to `sent`.
+- `unknown` means the transaction may have left. `send_status` offers `rebroadcast`,
+  `request_fee_bump` and `abandon_send`; never a new send from other coins while it could still
+  confirm. A rebroadcast the network has seen moves it to `sent`. `abandon_send({ txid })`
+  (custodian, `unknown` only) has the core free its coins and marks the send `abandoned`: if the
+  original still confirms, a later send from those coins fails, or replaces it if it confirms first.
+- A failed or cancelled send carries `errorCode`: the core's `rejected`, `expired`, `cancelled`,
+  `insufficient_funds`, `no_route`, `busy`, `refused`, `no_wallet`, `signer_unavailable`, `invalid`
+  or `failed`, or the backend's `coins_changed`, `core_lost` or `backend_restarted`. A core that
+  sends no code is read by its error text.
+- Sends are kept in `sends.json`, which holds no receipt, key or password. After a restart an
+  open send is reconciled with the core: a preview still awaiting approval is followed, one built
+  but never signed is signed, and one the core no longer has is settled from the wallet's history
+  (`sent` once a block or a source vouches for it, `unknown` if it may have left, otherwise
+  `failed` with `backend_restarted`).
 - `cancel_send` (the requester or a custodian) withdraws the approval request and unlocks the
   inputs. It is refused once the transaction is going out, and `close_wallet` withdraws open
   sends first.
@@ -83,7 +94,7 @@ leave this module. Events: `wallet_state_changed`, `sync_progress`, `balance_cha
 
 Networks: `mainnet`, `testnet4`, `signet`, and `regtest` when the persistence directory holds
 `regtest.json`; the wallet core and the node module need the same file in theirs. Persists
-`roles.json`, `settings.json` (the active network) and `wallets.json`.
+`roles.json`, `settings.json` (the active network), `wallets.json` and `sends.json`.
 
 ## Contracts
 

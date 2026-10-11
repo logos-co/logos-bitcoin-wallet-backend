@@ -3,7 +3,7 @@ module bitcoin_wallet_core_module {
   depends []
 
   method version() -> tstr description "`{ ok, version, crates }`."
-  method start_job(kind: tstr, params: tstr) -> tstr description "Starts `open_wallet` (`{ network, group?, family?, birthday? }`), `close_wallet`,\n`build_send` (`{ recipients: [{ address, amountSat }], feeRate? | target?, sendMax? }`),\n`bump_fee` (`{ txid, feeRate }`), `rebroadcast` (`{ txid }`), and, for the backend only,\n`sign_and_broadcast` and `cancel_send` (`{ previewId }`) and `abandon_send` (`{ txid }`).\n`{ ok, jobId, receipt }`."
+  method start_job(kind: tstr, params: tstr) -> tstr description "`{ ok, jobId, receipt }` for open_wallet, close_wallet, build_send, bump_fee, rebroadcast, and\nfor the backend sign_and_broadcast, cancel_send and abandon_send (README, Job kinds)."
   method job_status(job_id: tstr, receipt: tstr) -> tstr description "`{ ok, jobId, kind, state: queued|running|done|failed|cancelled, error }`."
   method job_result(job_id: tstr, receipt: tstr) -> tstr description "`{ ok, result }` once done."
   method ack_job(job_id: tstr, receipt: tstr) -> bool

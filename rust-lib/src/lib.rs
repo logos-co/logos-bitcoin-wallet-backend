@@ -59,7 +59,7 @@ mod contract {
                 assert_eq!(banned(p), None, "{m}({p}) is named like a secret");
             }
         }
-        let fields = [crate::request::OPEN_FIELDS, crate::request::SEND_FIELDS, crate::request::RECIPIENT_FIELDS, crate::request::BUMP_FIELDS, crate::gate::ROLES_FIELDS];
+        let fields = [crate::request::OPEN_FIELDS, crate::request::SEND_FIELDS, crate::request::RECIPIENT_FIELDS, crate::request::BUMP_FIELDS, crate::request::ABANDON_FIELDS, crate::gate::ROLES_FIELDS];
         for f in fields.iter().flat_map(|f| f.iter()) {
             assert_eq!(banned(f), None, "the field {f} is named like a secret");
         }

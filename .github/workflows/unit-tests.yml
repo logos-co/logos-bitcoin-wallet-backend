@@ -60,6 +60,9 @@ jobs:
                    no_parameter_or_field_is_named_like_a_secret \
                    one_open_send_per_wallet \
                    unknown_is_never_failed \
+                   codes_decide_and_text_is_the_fallback \
+                   sends_survive_a_restart_and_hold_no_secret \
+                   a_loaded_send_the_core_no_longer_has \
                    an_offer_nobody_acknowledges_is_withdrawn_after_the_window \
                    parse_refuses_precision_loss_and_odd_spellings \
                    format_is_exact_to_eight_places; do

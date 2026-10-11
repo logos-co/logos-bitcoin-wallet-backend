@@ -16,7 +16,7 @@ use crate::gate::{self, Caller, Roles};
 use crate::jobs::{Jobs, Purpose};
 use crate::registry::Registry;
 use crate::request;
-use crate::sends::{self, Kind, Next, Sends, Withdrawal};
+use crate::sends::{self, CoreView, Kind, Next, Seen, Sends, Withdrawal};
 use crate::view;
 use crate::{amount, now_secs, write_atomic};
 
@@ -84,16 +84,19 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     /// Any named module. `{ txid, feeRate }` replaces an unconfirmed send with RBF, approved like
     /// any send. `{ ok, requestId }`.
     fn request_fee_bump(&self, request_json: String) -> String;
-    /// `{ ok, requestId, kind, state, requester, summary, approvalHandle, txid, broadcast, via, error,
+    /// `{ ok, requestId, kind, state, requester, summary, approvalHandle, txid, broadcast, via, error, errorCode,
     /// cancelling }`; states preparing, awaiting_approval, committing, sent, failed, cancelled, unknown.
     fn send_status(&self, request_id: String) -> String;
-    /// `{ ok, sends: [{ requestId, kind, state, requester, approvalHandle, txid, createdAt, updatedAt }] }`, newest first.
+    /// `{ ok, sends: [{ requestId, kind, state, requester, approvalHandle, txid, errorCode, createdAt, updatedAt }] }`, newest first.
     fn list_sends(&self) -> String;
     /// The requester or a custodian. Withdraws the approval request and unlocks the inputs;
     /// refused once the transaction is going out. `{ ok, requestId, state, cancelling }`.
     fn cancel_send(&self, request_id: String) -> String;
     /// CUSTODIAN. Broadcasts a send's transaction again, named by request id or txid. `{ ok, jobId }`.
     fn rebroadcast(&self, request_or_txid: String) -> String;
+    /// CUSTODIAN. `{ txid }` of a send in `unknown`: the core frees its coins. `{ ok, jobId, requestId,
+    /// txid, note }`; if the original still confirms, a later send from them fails, or replaces it first.
+    fn abandon_send(&self, params_json: String) -> String;
 
     fn on_context_ready(&self, _ctx: &RustModuleContext) {}
 }
@@ -337,7 +340,7 @@ fn follow_jobs(inner: &Shared) {
                 match r {
                     Ok(v) if v["ok"] == true => {
                         let _ = ipc!(core(), ack_job_async_with_timeout, READ, &cid, &receipt);
-                        finish(inner, &jid, "done", v["result"].clone(), String::new());
+                        finish(inner, &jid, "done", v["result"].clone(), String::new(), None);
                     }
                     // Done but unread: keep asking. For a broadcast, done means it went out.
                     _ => {
@@ -350,7 +353,7 @@ fn follow_jobs(inner: &Shared) {
             "failed" | "cancelled" => {
                 let _ = ipc!(core(), ack_job_async_with_timeout, READ, &cid, &receipt);
                 let e = st["error"].as_str().unwrap_or("the job failed").to_string();
-                finish(inner, &jid, &state, Value::Null, e);
+                finish(inner, &jid, &state, Value::Null, e, st["code"].as_str().map(String::from));
             }
             s => lock(inner).jobs.answered(&jid, s),
         }
@@ -378,8 +381,8 @@ fn job_lost(inner: &Shared, jid: &str, done_unread: bool) {
     }
 }
 
-/// Moves whatever a finished job belongs to.
-fn finish(inner: &Shared, jid: &str, state: &str, result: Value, error: String) {
+/// Moves whatever a finished job belongs to. `code` is the core's stable failure code, if it sends one.
+fn finish(inner: &Shared, jid: &str, state: &str, result: Value, error: String, code: Option<String>) {
     let purpose = {
         let mut g = lock(inner);
         g.jobs.finish(jid, state, result.clone(), error.clone());
@@ -407,7 +410,7 @@ fn finish(inner: &Shared, jid: &str, state: &str, result: Value, error: String) 
         }
         Purpose::Build { request } => {
             if !done {
-                let st = lock(inner).sends.build_failed(&request, &error);
+                let st = lock(inner).sends.build_failed(&request, &error, code.as_deref());
                 emit_changed(&request, st);
                 return;
             }
@@ -416,7 +419,7 @@ fn finish(inner: &Shared, jid: &str, state: &str, result: Value, error: String) 
                 Next::Sign(pid) => match start_core_job(inner, "sign_and_broadcast", &json!({"previewId": pid}), Purpose::Sign { request: request.clone() }) {
                     Ok(j) => lock(inner).sends.set_sign_job(&request, &j),
                     Err(e) => {
-                        let st = lock(inner).sends.not_started(&request, &e);
+                        let st = lock(inner).sends.not_started(&request, &e, None);
                         emit_changed(&request, st);
                         cancel_preview(inner, &request, &pid);
                     }
@@ -434,7 +437,7 @@ fn finish(inner: &Shared, jid: &str, state: &str, result: Value, error: String) 
                 emit_changed(&request, st);
                 return;
             }
-            let (st, release) = lock(inner).sends.sign_failed(&request, &error);
+            let (st, release) = lock(inner).sends.sign_failed(&request, &error, code.as_deref());
             emit_changed(&request, st);
             if release {
                 let pid = lock(inner).sends.get(&request).map(|s| s.preview_id.clone()).unwrap_or_default();
@@ -451,6 +454,87 @@ fn finish(inner: &Shared, jid: &str, state: &str, result: Value, error: String) 
                 emit_changed(rid, st);
             }
             emit_job_finished(jid, state);
+        }
+        Purpose::Abandon { request, .. } => {
+            if done {
+                lock(inner).sends.abandoned(&request);
+                // The state stays unknown; the event tells surfaces to read the send again.
+                emit_send_status_changed(&request, "unknown");
+            }
+            emit_job_finished(jid, state);
+        }
+    }
+}
+
+/// Saves sends.json when a send changed; a failed write is tried again next tick.
+fn save_sends(inner: &Shared) {
+    let mut g = lock(inner);
+    if !g.sends.take_dirty() {
+        return;
+    }
+    let Some(dir) = g.dir.clone() else { return };
+    if let Err(e) = write_atomic(&dir.join("sends.json"), g.sends.to_json().to_string().as_bytes()) {
+        eprintln!("bitcoin_wallet_backend: sends.json: {e}");
+        g.sends.mark_dirty();
+    }
+}
+
+/// Whether the open wallet's history has `txid`, and whether a block or a source vouches for it.
+/// `(None, false)` while the wallet is busy.
+fn history_seen(txid: &str) -> (Option<Seen>, bool) {
+    for page in 0..4i64 {
+        let Ok(h) = ipc!(core(), history_async_with_timeout, READ, page).and_then(|s| parse(s, "wallet core")) else { return (None, false) };
+        if h["ok"] != true || h["busy"] == true {
+            return (None, false);
+        }
+        let rows = h["rows"].as_array().cloned().unwrap_or_default();
+        if let Some(r) = rows.iter().find(|r| r["txid"] == txid) {
+            let vouched = r["confirmations"].as_u64().unwrap_or(0) > 0 || !r["reportedBy"].is_null();
+            return (Some(if vouched { Seen::Vouched } else { Seen::Unreported }), true);
+        }
+        if rows.len() < 50 {
+            break;
+        }
+    }
+    (Some(Seen::Absent), true)
+}
+
+/// Reconciles the sends loaded from sends.json, which no job of this instance follows, with the core.
+fn follow_orphans(inner: &Shared) {
+    let orphans = lock(inner).sends.orphans();
+    let mut status: Option<Option<Value>> = None;
+    for id in orphans {
+        let Some((pid, net, group, txid)) = lock(inner).sends.get(&id).map(|s| (s.preview_id.clone(), s.network.clone(), s.group.clone(), s.txid.clone())) else {
+            continue;
+        };
+        let preview = if pid.is_empty() { None } else { ipc!(core(), preview_async_with_timeout, READ, &pid).and_then(|s| parse(s, "wallet core")).ok() };
+        if !pid.is_empty() && preview.is_none() {
+            continue; // The core didn't answer; ask again next tick.
+        }
+        let now = Instant::now();
+        let (st, next) = match preview.filter(|p| p["ok"] == true) {
+            Some(p) => {
+                let view = CoreView::Preview { state: p["state"].as_str().unwrap_or_default(), handle: p["approvalHandle"].as_str() };
+                lock(inner).sends.reconcile(&id, view, now)
+            }
+            None => {
+                let Some(st) = status.get_or_insert_with(|| core_status().ok()).clone() else { continue };
+                let open = matches!(st["state"].as_str(), Some("syncing" | "ready")) && st["network"] == net.as_str() && st["group"] == group.as_str();
+                let (history, readable) = if open && !txid.is_empty() { history_seen(&txid) } else { (Some(Seen::Absent), true) };
+                let view = CoreView::Gone { wallet_open: open, history: if open { history } else { None }, readable };
+                lock(inner).sends.reconcile(&id, view, now)
+            }
+        };
+        emit_changed(&id, st);
+        match next {
+            Next::Sign(pid) => {
+                // Refused when a sign job from before the restart still runs: the preview is followed instead.
+                if let Ok(j) = start_core_job(inner, "sign_and_broadcast", &json!({"previewId": pid}), Purpose::Sign { request: id.clone() }) {
+                    lock(inner).sends.set_sign_job(&id, &j);
+                }
+            }
+            Next::CancelPreview(pid) => cancel_preview(inner, &id, &pid),
+            _ => {}
         }
     }
 }
@@ -585,10 +669,12 @@ fn reactor(inner: Shared) {
     while !UNLOADING.load(Ordering::SeqCst) {
         follow_jobs(&inner);
         follow_sends(&inner);
+        follow_orphans(&inner);
         // Every 3 s; the node module's own view every 9 s, to catch a restart.
         if tick % 6 == 0 {
             slow_tick(&inner, (tick / 6) % 3 == 0);
         }
+        save_sends(&inner);
         tick += 1;
         nap(TICK);
     }
@@ -667,11 +753,13 @@ impl BitcoinWalletBackendModuleImpl {
         match start_core_job(&self.inner, core_kind, &params, Purpose::Build { request: rid.clone() }) {
             Ok(j) => {
                 lock(&self.inner).sends.set_build_job(&rid, &j);
+                save_sends(&self.inner);
                 emit_send_status_changed(&rid, "preparing");
                 ok(json!({"requestId": rid}))
             }
             Err(e) => {
-                let changed = lock(&self.inner).sends.not_started(&rid, &e);
+                let changed = lock(&self.inner).sends.not_started(&rid, &e, None);
+                save_sends(&self.inner);
                 emit_changed(&rid, changed);
                 json!({"ok": false, "requestId": rid, "error": e}).to_string()
             }
@@ -798,6 +886,7 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
         for id in open {
             let _ = withdraw(&self.inner, &id, Withdrawal::WalletClosed);
         }
+        save_sends(&self.inner);
         let (network, _) = self.effective_network();
         match start_core_job(&self.inner, "close_wallet", &json!({}), Purpose::Close { network }) {
             Ok(j) => ok(json!({"jobId": j})),
@@ -1003,6 +1092,7 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
         if let Err(e) = withdraw(&self.inner, &id, Withdrawal::Caller(who)) {
             return err(e);
         }
+        save_sends(&self.inner);
         let g = lock(&self.inner);
         let s = g.sends.status_json(&id);
         ok(json!({"requestId": id, "state": s["state"], "cancelling": s["cancelling"]}))
@@ -1034,6 +1124,32 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
         }
     }
 
+    fn abandon_send(&self, params_json: String) -> String {
+        if !self.custodian("abandon_send", &caller()) {
+            return refused();
+        }
+        let txid = match request::parse_abandon(&params_json) {
+            Ok(t) => t,
+            Err(e) => return err(e),
+        };
+        let rid = {
+            let g = lock(&self.inner);
+            match g.sends.by_txid(&txid).and_then(|id| g.sends.get(id)) {
+                None => return err("no send of this wallet has that txid"),
+                Some(s) if s.state != sends::State::Unknown => {
+                    return err(format!("send {} is {}: only a send whose outcome is unknown can be abandoned", s.id, s.state.name()))
+                }
+                Some(s) if s.abandoned => return err(format!("send {} was abandoned already", s.id)),
+                Some(s) => s.id.clone(),
+            }
+        };
+        let purpose = Purpose::Abandon { request: rid.clone(), txid: txid.clone() };
+        match start_core_job(&self.inner, "abandon_send", &json!({"txid": txid}), purpose) {
+            Ok(j) => ok(json!({"jobId": j, "requestId": rid, "txid": txid, "note": sends::ABANDONED})),
+            Err(e) => err(e),
+        }
+    }
+
     fn on_context_ready(&self, ctx: &RustModuleContext) {
         let dir = PathBuf::from(&ctx.instance_persistence_path);
         let roles = std::fs::read_to_string(dir.join("roles.json")).ok();
@@ -1050,6 +1166,12 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
                 }
             }
             g.registry = Registry::new(Some(dir.join("wallets.json")));
+            // Sends survive a restart; open ones are reconciled with the core's previews.
+            match std::fs::read_to_string(dir.join("sends.json")).map(|t| serde_json::from_str::<Value>(&t)) {
+                Ok(Ok(v)) => g.sends = Sends::load(&v, Instant::now()),
+                Ok(Err(e)) => eprintln!("bitcoin_wallet_backend: sends.json unreadable ({e}); starting with none"),
+                Err(_) => {}
+            }
             g.dir = Some(dir);
         }
         // Nothing outbound here: the threads make every call, after the host has wired us.

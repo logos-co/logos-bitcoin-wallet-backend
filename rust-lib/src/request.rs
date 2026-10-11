@@ -15,6 +15,7 @@ pub const OPEN_FIELDS: &[&str] = &["network", "group", "family", "birthday", "la
 pub const SEND_FIELDS: &[&str] = &["recipients", "feeRate", "target", "sendMax"];
 pub const RECIPIENT_FIELDS: &[&str] = &["address", "amountSat", "amountBtc"];
 pub const BUMP_FIELDS: &[&str] = &["txid", "feeRate"];
+pub const ABANDON_FIELDS: &[&str] = &["txid"];
 
 const MAX_RECIPIENTS: usize = 100;
 
@@ -217,6 +218,17 @@ pub fn parse_bump(text: &str) -> Result<Value, String> {
     Ok(json!({"txid": txid, "feeRate": rate}))
 }
 
+/// `{ txid }`, the core's `abandon_send` parameters.
+pub fn parse_abandon(text: &str) -> Result<String, String> {
+    let v = doc(text, "abandon_send")?;
+    let o = object(&v, ABANDON_FIELDS, "abandon_send")?;
+    let txid = text_field(o, "txid")?.unwrap_or_default().to_ascii_lowercase();
+    if !is_txid(&txid) {
+        return Err("txid must be 64 hex characters".into());
+    }
+    Ok(txid)
+}
+
 pub fn is_txid(t: &str) -> bool {
     t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -302,5 +314,8 @@ mod tests {
         assert!(parse_bump(r#"{"txid":"nope","feeRate":5}"#).is_err());
         assert!(parse_bump(&format!(r#"{{"txid":"{t}"}}"#)).is_err());
         assert!(parse_bump(&format!(r#"{{"txid":"{t}","feeRate":5,"previewId":"p1"}}"#)).is_err());
+        assert_eq!(parse_abandon(&format!(r#"{{"txid":"{t}"}}"#)).unwrap(), "ab".repeat(32));
+        assert!(parse_abandon(&format!(r#"{{"txid":"{t}","force":true}}"#)).is_err());
+        assert!(parse_abandon(r#"{"txid":"s1"}"#).is_err());
     }
 }

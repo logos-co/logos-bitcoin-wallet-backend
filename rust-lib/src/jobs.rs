@@ -15,17 +15,18 @@ pub enum Purpose {
     Sign { request: String },
     CancelSend { request: String },
     Rebroadcast { request: Option<String>, txid: String },
+    Abandon { request: String, txid: String },
 }
 
 impl Purpose {
     /// Opens, closes and rebroadcasts are polled by callers; send jobs show through send_status.
     pub fn public(&self) -> bool {
-        matches!(self, Purpose::Open { .. } | Purpose::Close { .. } | Purpose::Rebroadcast { .. })
+        matches!(self, Purpose::Open { .. } | Purpose::Close { .. } | Purpose::Rebroadcast { .. } | Purpose::Abandon { .. })
     }
 
     pub fn request(&self) -> Option<&str> {
         match self {
-            Purpose::Build { request } | Purpose::Sign { request } | Purpose::CancelSend { request } => Some(request),
+            Purpose::Build { request } | Purpose::Sign { request } | Purpose::CancelSend { request } | Purpose::Abandon { request, .. } => Some(request),
             Purpose::Rebroadcast { request, .. } => request.as_deref(),
             _ => None,
         }
