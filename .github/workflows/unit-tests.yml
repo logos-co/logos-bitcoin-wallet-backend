@@ -1,0 +1,67 @@
+name: Unit tests
+
+# Plain cargo: --no-default-features drops the module glue. Cargo still reads the optional
+# SDK path dependency's manifest, so the SDK is checked out at the revision the builder pins.
+
+on:
+  pull_request:
+    branches: [master, main]
+  push:
+    branches: [master, main]
+
+concurrency:
+  group: unit-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-test:
+    name: cargo test (no module glue)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find the SDK revision the builder pins
+        id: sdk
+        shell: bash
+        run: |
+          set -euo pipefail
+          rev=$(jq -r '.nodes as $n | ($n[.root].inputs["logos-module-builder"]) as $b
+                       | $n[$n[$b].inputs["logos-rust-sdk"]].locked.rev' flake.lock)
+          [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::no SDK pin in flake.lock ($rev)"; exit 1; }
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: logos-co/logos-rust-sdk
+          ref: ${{ steps.sdk.outputs.rev }}
+          path: logos-rust-sdk-src
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-lib
+
+      - name: cargo test --no-default-features
+        run: cargo test --manifest-path rust-lib/Cargo.toml --no-default-features --locked
+
+      - name: The guard tests must be present
+        # A suite that silently stops compiling reads as coverage. These hold the role gate,
+        # the send states, the amounts and the no-secrets contract.
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=$(cargo test --manifest-path rust-lib/Cargo.toml --no-default-features --locked -- --list)
+          for t in configure_is_total_and_refuses_unknown_keys \
+                   the_host_anchor_and_strangers_are_refused_everywhere \
+                   every_method_is_in_exactly_one_registry \
+                   no_parameter_or_field_is_named_like_a_secret \
+                   one_open_send_per_wallet \
+                   unknown_is_never_failed \
+                   an_offer_nobody_acknowledges_is_withdrawn_after_the_window \
+                   parse_refuses_precision_loss_and_odd_spellings \
+                   format_is_exact_to_eight_places; do
+            echo "$out" | grep -q "$t" || { echo "::error::missing guard test: $t"; exit 1; }
+          done

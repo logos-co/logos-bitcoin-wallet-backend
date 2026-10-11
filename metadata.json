@@ -1,0 +1,31 @@
+{
+  "name": "bitcoin_wallet_backend",
+  "display_name": "Bitcoin Wallet Backend",
+  "version": "0.1.0",
+  "type": "core",
+  "interface": "cdylib",
+  "concurrency": "multi",
+  "category": "wallet",
+  "description": "Bitcoin wallet coordinator: custodian roles, the wallet registry, the wallet core's jobs under backend ids, sends from request to settlement, and the node module's source settings. Holds no key material and takes no password.",
+  "author": "Logos Core Team",
+  "main": "bitcoin_wallet_backend_plugin",
+  "dependencies": ["bitcoin_wallet_core_module", "bitcoin_node_module"],
+  "dependency_overrides": {
+    "bitcoin_wallet_core_module": { "file": "contracts/bitcoin_wallet_core_module.lidl" },
+    "bitcoin_node_module": { "file": "contracts/bitcoin_node_module.lidl" }
+  },
+  "include": [],
+  "capabilities": [],
+  "codegen": {
+    "rust": { "crate": "rust-lib", "trait": "BitcoinWalletBackendModule", "source": "src/glue.rs" }
+  },
+  "nix": {
+    "rust": {
+      "toolchain": "1.96.0",
+      "packages": { "build": [], "runtime": [] }
+    },
+    "external_libraries": [],
+    "packages": { "build": [], "runtime": [] },
+    "cmake": { "find_packages": [], "extra_include_dirs": [] }
+  }
+}

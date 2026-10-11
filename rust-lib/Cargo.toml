@@ -1,0 +1,31 @@
+[package]
+name = "bitcoin_wallet_backend"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+
+# Standalone crate: keeps cargo from adopting a workspace in a parent directory.
+[workspace]
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+# No network crate: this module makes no connection of its own. It reaches the wallet core
+# and the node module through their generated clients.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Provided by logos-module-builder at build time (staged into ../logos-rust-sdk-src).
+logos-rust-sdk = { path = "../logos-rust-sdk-src", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = ["logos_module"]
+logos_module = ["dep:logos-rust-sdk"]
+
+[profile.release]
+panic = "unwind"

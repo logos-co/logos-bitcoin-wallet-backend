@@ -1,0 +1,27 @@
+module bitcoin_node_module {
+  version "0.1.0"
+  depends []
+
+  method list_networks() -> tstr description "`{ ok, networks }`: mainnet, testnet4 and signet, and regtest when the instance directory\nholds regtest.json."
+  method config_status() -> tstr description "`{ ok, state: unconfigured|unready|configured, configured, unconfigured, proxySet, walletOpen }`."
+  method init_defaults() -> tstr description "Fills what is absent: the Tor proxy, and each network's sources (Kyoto on, one Esplora\nserver for fee rates, every other source off). `{ ok, applied }`. Backend only."
+  method get_sources(network: tstr) -> tstr description "`{ ok, network, configured, walletOpen, proxy, sources: [{ id, kind, url, operator, label, use,\nhistory, tor, lan, hasCredentials, route, suspect }], exposes, withoutTor, crossCheck }`; no credential."
+  method set_sources(network: tstr, list_json: tstr) -> tstr description "Replaces the list (a JSON array of sources); answers as get_sources. Backend only;\nrefused while a wallet is open on `network`."
+  method set_source(network: tstr, source_id: tstr, changes_json: tstr) -> tstr description "Changes one source: `{ use?, history?, tor? }`. tor: false is refused for an onion\nservice. Answers as get_sources. Backend only; refused while a wallet is open."
+  method set_proxy(proxy: tstr) -> tstr description "The Tor proxy for every source, socks5h://host:port; empty clears it, which leaves\nevery source routed through Tor without a route. Backend only; refused while a wallet is open."
+  method set_wallet_open(network: tstr, open: bool) -> tstr description "Whether a wallet is open on `network`, which locks its settings. Backend only."
+  method route_table(network: tstr) -> tstr description "`{ ok, network, proxy, chain, history, pending, fees, broadcast, check, peers, crossCheck, unrouted }`,\neach role `[{ id, kind, url, operator, route: tor|direct|onion }]`. Backend and wallet core."
+  method report_mismatch(network: tstr, source_id: tstr, kind: tstr, height: tstr) -> tstr description "Marks a source suspect until the backend clears it; `height` decimal, or empty.\nBackend and wallet core."
+  method clear_suspect(network: tstr, source_id: tstr) -> tstr description "`{ ok, network, sourceId, cleared }`. Backend only."
+  method peer_list(network: tstr) -> tstr description "`{ ok, network, list: { format, network, version, date, note, refreshUrl, peers, keyId,\nsignature }, source: shipped|fetched, ownPeers, today, route, kyotoTor }`."
+  method set_own_peers(network: tstr, peers_json: tstr) -> tstr description "The user's own Kyoto peers (a JSON array of host[:port]), which replace the list; `[]`\ngoes back to it. Answers as peer_list. Backend only; refused while a wallet is open."
+  method refresh_peer_list(network: tstr) -> tstr description "Fetches a newer signed list through the proxy and keeps it if its signature checks.\nBackend only."
+  method source_health(network: tstr) -> tstr description "`{ ok, network, overall, pending, sources: [{ id, kind, state, tipHeight, tipHash, rttMs,\nroute, checkedAt, error, serverVersion, suspect, ... }] }` from address-free calls only."
+  method probe(network: tstr, source_id: tstr) -> tstr description "Probes `source_id` now, or every enabled server when empty, then answers as\nsource_health plus `answered`, within 15 s."
+  method local_node(network: tstr) -> tstr description "`{ ok, network, enabled, available, status?, error? }` from bitcoind_module, when loaded."
+  method source_credentials(network: tstr, source_id: tstr) -> tstr description "`{ ok, network, sourceId, username, password }` of an Esplora server. Wallet core only."
+
+  event source_health_changed(network: tstr, payload: tstr) description "source_health()'s reply, when anything but round-trip times changed."
+  event routes_changed(network: tstr) description "route_table(network) would now answer differently."
+  event source_suspect(network: tstr, source_id: tstr, kind: tstr)
+}
