@@ -44,6 +44,9 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     fn job_status(&self, job_id: String) -> String;
     /// CUSTODIAN. The open wallet's public descriptors, as a call result only, never an event.
     fn descriptors(&self) -> String;
+    /// CUSTODIAN. `{ date: "YYYY-MM-DD" }` or `{ height }` for the open wallet; the core scans again from
+    /// it. `{ ok, jobId }`; the job's result is `{ birthday: { height, source }, rescanFrom }`.
+    fn set_birthday(&self, params_json: String) -> String;
 
     /// The core's status plus `syncPercent`, `activeNetwork`, `label` and `openSend`.
     fn wallet_status(&self) -> String;
@@ -67,6 +70,9 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     fn sources(&self) -> String;
     /// The node module's source health, plus `wallet`, the open wallet's own view of them.
     fn source_health(&self) -> String;
+    /// `{ network?, source }`: the node module probes that source now, or every enabled server for "",
+    /// within 15 s; a TLS server's row carries `certificate`.
+    fn probe(&self, params_json: String) -> String;
     /// The servers that have seen the open wallet's addresses, and since when.
     fn exposure(&self) -> String;
     /// CUSTODIAN. Replaces the network's sources, a JSON array. Refused while a wallet is open.
@@ -124,6 +130,8 @@ use bitcoin_wallet_core_module::BitcoinWalletCoreModuleClient as CoreClient;
 /// Reads answer well inside the host's 20 s deadline; so do the writes that follow them.
 const READ: Duration = Duration::from_secs(6);
 const WRITE: Duration = Duration::from_secs(8);
+/// The node module answers a probe within 15 s.
+const PROBE: Duration = Duration::from_secs(17);
 const TICK: Duration = Duration::from_millis(500);
 
 static UNLOADING: AtomicBool = AtomicBool::new(false);
@@ -322,7 +330,7 @@ fn follow_jobs(inner: &Shared) {
         let st = match status {
             Ok(v) if v["ok"] == true => v,
             Ok(v) if v["error"] == "unknown job" => {
-                lock(inner).jobs.finish(&jid, "failed", Value::Null, "the wallet core lost this job".into());
+                lock(inner).jobs.finish(&jid, "failed", Value::Null, "the wallet core lost this job".into(), None);
                 job_lost(inner, &jid, false);
                 continue;
             }
@@ -385,7 +393,7 @@ fn job_lost(inner: &Shared, jid: &str, done_unread: bool) {
 fn finish(inner: &Shared, jid: &str, state: &str, result: Value, error: String, code: Option<String>) {
     let purpose = {
         let mut g = lock(inner);
-        g.jobs.finish(jid, state, result.clone(), error.clone());
+        g.jobs.finish(jid, state, result.clone(), error.clone(), code.as_deref());
         g.jobs.get(jid).map(|j| j.purpose.clone())
     };
     let Some(purpose) = purpose else { return };
@@ -452,6 +460,14 @@ fn finish(inner: &Shared, jid: &str, state: &str, result: Value, error: String, 
             if let (true, Some(rid)) = (done, request.as_deref()) {
                 let st = lock(inner).sends.rebroadcast(rid, &result);
                 emit_changed(rid, st);
+            }
+            emit_job_finished(jid, state);
+        }
+        Purpose::Birthday { network, group } => {
+            if done {
+                if let Err(e) = lock(inner).registry.set_birthday(&network, &group, result["birthday"].clone()) {
+                    eprintln!("bitcoin_wallet_backend: {e}");
+                }
             }
             emit_job_finished(jid, state);
         }
@@ -905,6 +921,29 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
         relay(ipc!(core(), descriptors_async_with_timeout, READ), "the wallet core")
     }
 
+    fn set_birthday(&self, params_json: String) -> String {
+        if !self.custodian("set_birthday", &caller()) {
+            return refused();
+        }
+        let params = match request::parse_birthday(&params_json) {
+            Ok(p) => p,
+            Err(e) => return err(e),
+        };
+        let st = match core_status() {
+            Ok(s) if matches!(s["state"].as_str(), Some("syncing" | "ready")) => s,
+            Ok(_) => return err("no wallet is open"),
+            Err(e) => return err(format!("the wallet core did not answer: {e}")),
+        };
+        let purpose = Purpose::Birthday {
+            network: st["network"].as_str().unwrap_or_default().into(),
+            group: st["group"].as_str().unwrap_or_default().into(),
+        };
+        match start_core_job(&self.inner, "set_birthday", &params, purpose) {
+            Ok(j) => ok(json!({"jobId": j})),
+            Err(e) => err(e),
+        }
+    }
+
     fn wallet_status(&self) -> String {
         let st = match core_status() {
             Ok(s) => s,
@@ -975,6 +1014,16 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
             }
         }
         v.to_string()
+    }
+
+    fn probe(&self, params_json: String) -> String {
+        let regtest = lock(&self.inner).regtest;
+        let (network, source) = match request::parse_probe(&params_json, regtest) {
+            Ok(p) => p,
+            Err(e) => return err(e),
+        };
+        let network = network.unwrap_or_else(|| self.effective_network().0);
+        relay(ipc!(node(), probe_async_with_timeout, PROBE, &network, &source), "bitcoin_node_module")
     }
 
     fn exposure(&self) -> String {

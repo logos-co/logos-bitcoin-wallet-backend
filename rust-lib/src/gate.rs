@@ -143,6 +143,7 @@ pub const CUSTODIAN_METHODS: &[&str] = &[
     "clear_suspect",
     "rebroadcast",
     "abandon_send",
+    "set_birthday",
 ];
 
 /// Any named module may ask for a send; the person approves it in the signer app.
@@ -167,6 +168,7 @@ pub const UNGATED_METHODS: &[&str] = &[
     "parse_btc",
     "sources",
     "source_health",
+    "probe",
     "exposure",
     "send_status",
     "list_sends",

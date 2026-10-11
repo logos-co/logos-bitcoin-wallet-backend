@@ -12,10 +12,12 @@ pub const REGTEST: &str = "regtest";
 
 pub const FAMILIES: &[&str] = &["bitcoin", "bitcoin_taproot"];
 pub const OPEN_FIELDS: &[&str] = &["network", "group", "family", "birthday", "label"];
-pub const SEND_FIELDS: &[&str] = &["recipients", "feeRate", "target", "sendMax"];
+pub const SEND_FIELDS: &[&str] = &["recipients", "feeRate", "target", "sendMax", "smallChangeToFee"];
 pub const RECIPIENT_FIELDS: &[&str] = &["address", "amountSat", "amountBtc"];
 pub const BUMP_FIELDS: &[&str] = &["txid", "feeRate"];
 pub const ABANDON_FIELDS: &[&str] = &["txid"];
+pub const BIRTHDAY_FIELDS: &[&str] = &["date", "height"];
+pub const PROBE_FIELDS: &[&str] = &["network", "source"];
 
 const MAX_RECIPIENTS: usize = 100;
 
@@ -203,6 +205,12 @@ pub fn parse_send(text: &str) -> Result<(Value, Vec<ToCheck>), String> {
     if send_max {
         core["sendMax"] = json!(true);
     }
+    // Change too small to spend at the rate goes to the fee instead; the core says so in warnings.
+    match o.get("smallChangeToFee") {
+        None | Some(Value::Null) => {}
+        Some(Value::Bool(b)) => core["smallChangeToFee"] = json!(b),
+        Some(_) => return Err("smallChangeToFee must be true or false".into()),
+    }
     Ok((core, checks))
 }
 
@@ -227,6 +235,33 @@ pub fn parse_abandon(text: &str) -> Result<String, String> {
         return Err("txid must be 64 hex characters".into());
     }
     Ok(txid)
+}
+
+/// `{ date: "YYYY-MM-DD" }` or `{ height }`, the core's `set_birthday` parameters.
+pub fn parse_birthday(text: &str) -> Result<Value, String> {
+    let v = doc(text, "set_birthday")?;
+    let o = object(&v, BIRTHDAY_FIELDS, "set_birthday")?;
+    match (o.get("date").filter(|x| !x.is_null()), o.get("height").filter(|x| !x.is_null())) {
+        (Some(Value::String(d)), None) if valid_day(d.trim()) => Ok(json!({"date": d.trim()})),
+        (None, Some(Value::Number(n))) if n.as_u64().is_some_and(|h| h <= u32::MAX as u64) => Ok(json!({"height": n})),
+        (Some(_), Some(_)) => Err("give date or height, not both".into()),
+        _ => Err("set_birthday takes { date: \"YYYY-MM-DD\" } or { height }".into()),
+    }
+}
+
+/// `{ network?, source }`: one source, or every enabled server when `source` is empty.
+pub fn parse_probe(text: &str, regtest: bool) -> Result<(Option<String>, String), String> {
+    let v = doc(text, "probe")?;
+    let o = object(&v, PROBE_FIELDS, "probe")?;
+    let network = text_field(o, "network")?.filter(|n| !n.is_empty());
+    if network.as_deref().is_some_and(|n| !is_network(n, regtest)) {
+        return Err(format!("unknown network {}", network.unwrap_or_default()));
+    }
+    let source = match o.get("source") {
+        Some(Value::String(s)) => s.trim().to_string(),
+        _ => return Err("source is required: a source id, or \"\" for every enabled server".into()),
+    };
+    Ok((network, source))
 }
 
 pub fn is_txid(t: &str) -> bool {
@@ -281,6 +316,9 @@ mod tests {
         assert!(!checks[0].needs_uri_amount);
         let (_, checks) = parse_send(r#"{"recipients":[{"address":"BITCOIN:bcrt1qa?amount=0.1"}]}"#).unwrap();
         assert!(checks[0].needs_uri_amount, "the URI's amount must be there");
+        let (core, _) = parse_send(r#"{"recipients":[{"address":"a","amountSat":"5000"}],"feeRate":50,"smallChangeToFee":true}"#).unwrap();
+        assert_eq!(core["smallChangeToFee"], true, "passed to build_send as given");
+        assert!(parse_send(r#"{"recipients":[{"address":"a","amountSat":"5000"}],"smallChangeToFee":"yes"}"#).is_err());
     }
 
     #[test]
@@ -317,5 +355,23 @@ mod tests {
         assert_eq!(parse_abandon(&format!(r#"{{"txid":"{t}"}}"#)).unwrap(), "ab".repeat(32));
         assert!(parse_abandon(&format!(r#"{{"txid":"{t}","force":true}}"#)).is_err());
         assert!(parse_abandon(r#"{"txid":"s1"}"#).is_err());
+    }
+
+    #[test]
+    fn a_birthday_is_a_day_or_a_height() {
+        assert_eq!(parse_birthday(r#"{"date":"2024-04-20"}"#).unwrap(), json!({"date": "2024-04-20"}));
+        assert_eq!(parse_birthday(r#"{"height":840000}"#).unwrap(), json!({"height": 840000}));
+        for bad in [r#"{}"#, r#"{"date":"2024-04-20","height":1}"#, r#"{"date":"soon"}"#, r#"{"height":-1}"#, r#"{"height":"840000"}"#, r#"{"day":"2024-04-20"}"#] {
+            assert!(parse_birthday(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_probe_names_a_source() {
+        assert_eq!(parse_probe(r#"{"source":"electrum-0"}"#, false).unwrap(), (None, "electrum-0".to_string()));
+        assert_eq!(parse_probe(r#"{"network":"regtest","source":""}"#, true).unwrap(), (Some("regtest".into()), String::new()));
+        assert!(parse_probe(r#"{"network":"regtest","source":"x"}"#, false).is_err());
+        assert!(parse_probe(r#"{"network":"signet"}"#, false).is_err(), "source is required");
+        assert!(parse_probe(r#"{"source":"x","url":"y"}"#, false).is_err());
     }
 }

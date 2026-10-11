@@ -16,12 +16,13 @@ pub enum Purpose {
     CancelSend { request: String },
     Rebroadcast { request: Option<String>, txid: String },
     Abandon { request: String, txid: String },
+    Birthday { network: String, group: String },
 }
 
 impl Purpose {
     /// Opens, closes and rebroadcasts are polled by callers; send jobs show through send_status.
     pub fn public(&self) -> bool {
-        matches!(self, Purpose::Open { .. } | Purpose::Close { .. } | Purpose::Rebroadcast { .. } | Purpose::Abandon { .. })
+        matches!(self, Purpose::Open { .. } | Purpose::Close { .. } | Purpose::Rebroadcast { .. } | Purpose::Abandon { .. } | Purpose::Birthday { .. })
     }
 
     pub fn request(&self) -> Option<&str> {
@@ -41,6 +42,8 @@ pub struct Job {
     pub state: String,
     pub result: Value,
     pub error: String,
+    /// The core's stable failure code, when it sends one.
+    pub code: String,
     pub misses: u32,
     pub purpose: Purpose,
     pub finished_at: Option<Instant>,
@@ -77,6 +80,7 @@ impl Jobs {
                 state: "queued".into(),
                 result: Value::Null,
                 error: String::new(),
+                code: String::new(),
                 misses: 0,
                 purpose,
                 finished_at: None,
@@ -128,11 +132,12 @@ impl Jobs {
         true
     }
 
-    pub fn finish(&mut self, id: &str, state: &str, result: Value, error: String) {
+    pub fn finish(&mut self, id: &str, state: &str, result: Value, error: String, code: Option<&str>) {
         if let Some(j) = self.map.get_mut(id) {
             j.state = state.into();
             j.result = result;
             j.error = error;
+            j.code = code.unwrap_or_default().into();
             j.finished_at = Some(Instant::now());
         }
     }
@@ -148,6 +153,7 @@ impl Jobs {
                 }
                 if j.state == "failed" || j.state == "cancelled" {
                     v["error"] = json!(j.error);
+                    v["code"] = if j.code.is_empty() { Value::Null } else { json!(j.code) };
                 }
                 v
             }
@@ -171,7 +177,7 @@ mod tests {
         assert!(!s.contains("secret-receipt") && !s.contains("\"j7\""), "{s}");
         assert_eq!(j.pending().len(), 1);
         assert_eq!(j.lifecycle_pending().as_deref(), Some("signet"));
-        j.finish(&id, "done", json!({"group": "g_1"}), String::new());
+        j.finish(&id, "done", json!({"group": "g_1"}), String::new(), None);
         assert_eq!(j.status_json(&id)["result"]["group"], "g_1");
         assert!(j.lifecycle_pending().is_none());
     }
@@ -199,5 +205,15 @@ mod tests {
         assert!(j.miss(&id));
         assert_eq!(j.status_json(&id)["state"], "failed");
         assert!(!j.miss(&id), "given up once");
+    }
+
+    #[test]
+    fn a_failed_job_keeps_the_core_code() {
+        let mut j = Jobs::default();
+        let id = j.track("set_birthday", "j1", "r", Purpose::Birthday { network: "regtest".into(), group: "g_1".into() });
+        j.finish(&id, "failed", Value::Null, "the wallet has a transaction at height 120, before a birthday at 150".into(), Some("failed"));
+        let s = j.status_json(&id);
+        assert_eq!((s["state"].clone(), s["code"].clone()), (json!("failed"), json!("failed")));
+        assert!(s["error"].as_str().unwrap().contains("height 120"));
     }
 }

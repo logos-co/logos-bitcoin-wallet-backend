@@ -14,9 +14,9 @@ One role, the custodian set, defaults to `bitcoin_wallet_ui`. There is no approv
 
 | Who | Methods |
 |---|---|
-| custodian | `configure`, `set_active_network`, `open_wallet`, `close_wallet`, `descriptors`, `set_sources`, `set_source`, `set_proxy`, `clear_suspect`, `rebroadcast`, `abandon_send` |
+| custodian | `configure`, `set_active_network`, `open_wallet`, `close_wallet`, `descriptors`, `set_birthday`, `set_sources`, `set_source`, `set_proxy`, `clear_suspect`, `rebroadcast`, `abandon_send` |
 | any named module | `request_send`, `request_fee_bump`, and `cancel_send` for its own request |
-| anyone | every read: `caller_identity`, `list_networks`, `list_wallets`, `job_status`, `wallet_status`, `balances`, `history`, `receive_address`, `fee_rates`, `address_valid`, `format_btc`, `parse_btc`, `sources`, `source_health`, `exposure`, `send_status`, `list_sends` |
+| anyone | every read: `caller_identity`, `list_networks`, `list_wallets`, `job_status`, `wallet_status`, `balances`, `history`, `receive_address`, `fee_rates`, `address_valid`, `format_btc`, `parse_btc`, `sources`, `source_health`, `probe`, `exposure`, `send_status`, `list_sends` |
 
 `configure({ custodians })` replaces the set. It is total (`{}` leaves nobody), refuses
 unknown keys, and is saved to `roles.json` in the instance's persistence directory. Only a
@@ -39,6 +39,13 @@ the person pick, create or restore one. It answers `{ ok, jobId }`. While the pe
 `keystore.accounts.open` intent. Once open, the wallet is recorded in `wallets.json` with its
 group, family, network, label and birthday, and nothing secret.
 
+`set_birthday({ date: "YYYY-MM-DD" } | { height })` gives the open wallet a birthday later, for a
+restore that had none: `{ ok, jobId }`, and the job's result is `{ birthday: { height, source },
+rescanFrom }`. The core refuses a birthday after the wallet's first transaction, or a day still to
+come, and its code stays on the job. The registry keeps the new birthday. While the rescan runs,
+`wallet_status.rescanFrom` holds the height; `syncPercent` then counts Kyoto's share done from
+there, and is absent under a history server's full scan, which reports no height.
+
 From the moment an open starts until the wallet closes, the backend tells the node module
 (`set_wallet_open`), which then refuses source changes on that network. It checks the node
 module every 9 s and says so again after a restart. `set_sources`, `set_source` and
@@ -49,8 +56,10 @@ wallet open, in the core.
 ## Sends
 
 1. Any named module calls `request_send({ recipients: [{ address, amountSat | amountBtc }],
-   feeRate? | target?, sendMax? })`, or `request_fee_bump({ txid, feeRate })` to replace an
-   unconfirmed send with RBF. It gets a `requestId`. One send is open per wallet.
+   feeRate? | target?, sendMax?, smallChangeToFee? })`, or `request_fee_bump({ txid, feeRate })`
+   to replace an unconfirmed send with RBF. It gets a `requestId`. One send is open per wallet.
+   With `smallChangeToFee`, change too small to spend at the rate goes to the fee; the summary's
+   `warnings` carry the core's `change_to_fee` or `change_too_small` as given.
 2. `preparing`: the core builds an unsigned PSBT and locks its inputs, and the backend asks it
    to sign and broadcast.
 3. `awaiting_approval`: `send_status` carries the core's `approvalHandle` (`smh_…`), which the
@@ -83,10 +92,21 @@ wallet open, in the core.
   inputs. It is refused once the transaction is going out, and `close_wallet` withdraws open
   sends first.
 
+## Sources
+
+`sources`, `source_health` and `probe({ network?, source })` pass the node module's rows through:
+`certSha256`, `certificate { certSha256, subject, issuer, notBefore, notAfter, trusted }`, `encrypted`
+and `userAdded`. `set_source` and `set_sources` take `certSha256` to pin a TLS server's certificate,
+and null or `""` clears it; like every source change they need the custodian and a closed wallet.
+On regtest the wallet core takes its sources from its own `regtest.json`, so pins there are seen
+by the node module's probes only.
+
 ## Everything else
 
 Reads pass through with display amounts (`…Btc`, eight decimals) and `syncPercent`, counted
-from the wallet's birthday and absent while a height is unknown. A busy core answers empty
+from the wallet's birthday and absent while a height is unknown. Everything else the core says
+passes as it is: `lastReorg`, `rescanFrom`, `birthdaySource`, `node`, `kyoto` and the authority's
+kind in `wallet_status`; `blockHash` and `sendState` on history rows; `authority_suspect` alerts. A busy core answers empty
 amounts, never zero. `format_btc` and `parse_btc` are exact; more than eight decimals is
 refused. Long operations answer a backend job id (`job_status`); the core's receipts never
 leave this module. Events: `wallet_state_changed`, `sync_progress`, `balance_changed`,

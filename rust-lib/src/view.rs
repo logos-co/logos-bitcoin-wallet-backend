@@ -26,10 +26,15 @@ pub fn effective_network(status: Option<&Value>, active: &str) -> String {
     status.and_then(open_network).unwrap_or_else(|| active.to_string())
 }
 
-/// Progress from the wallet's birthday to the authority's tip. None while either height is
-/// unknown: a percentage of a chain nobody read is no answer.
+/// Progress to the authority's tip from the birthday, or from `rescanFrom` while a rescan runs.
+/// None while a height is unknown: a percentage of a chain nobody read is no answer.
 pub fn sync_percent(status: &Value) -> Option<u64> {
     let tip = status["authority"]["height"].as_u64().filter(|t| *t > 0)?;
+    if status["rescanFrom"].as_u64().is_some() {
+        // Kyoto restarts at rescanFrom and reports its share done; other scans report no height.
+        let kyoto = status["authority"]["kind"] == "kyoto";
+        return status["kyoto"]["progress"].as_f64().filter(|p| kyoto && (0.0..=1.0).contains(p)).map(|p| (p * 100.0).floor() as u64);
+    }
     let wallet = status["walletTip"].as_u64()?;
     if wallet >= tip {
         return Some(100);
@@ -105,6 +110,15 @@ mod tests {
         // Counted from the birthday, not from genesis.
         assert_eq!(sync_percent(&json!({"authority": {"height": 1000}, "walletTip": 950, "birthday": 900})), Some(50));
         assert_eq!(sync_percent(&json!({"authority": {"height": 1000}, "walletTip": 0, "birthday": 900})), Some(0));
+        // A rescan: the wallet's tip stays put, so only Kyoto's share done, counted from rescanFrom, says anything.
+        let k = json!({"authority": {"height": 1000, "kind": "kyoto"}, "walletTip": 1000, "rescanFrom": 700, "kyoto": {"progress": 0.42}});
+        assert_eq!(sync_percent(&k), Some(42));
+        let event = json!({"authority": {"height": 1000, "kind": "kyoto"}, "rescanFrom": 700, "kyoto": {"progress": 1.0}});
+        assert_eq!(sync_percent(&event), Some(100), "a state event carries no walletTip");
+        let e = json!({"authority": {"height": 1000, "kind": "electrum_headers"}, "walletTip": 1000, "rescanFrom": 700});
+        assert_eq!(sync_percent(&e), None, "a full scan reports no height");
+        let done = json!({"authority": {"height": 1000, "kind": "electrum_headers"}, "walletTip": 1000, "rescanFrom": null});
+        assert_eq!(sync_percent(&done), Some(100));
     }
 
     #[test]

@@ -82,6 +82,15 @@ impl Registry {
         self.persist()
     }
 
+    /// A birthday set later; the wallet's other fields stay.
+    pub fn set_birthday(&mut self, network: &str, group: &str, birthday: Value) -> Result<(), String> {
+        match self.entries.iter_mut().find(|e| e.network == network && e.group == group) {
+            Some(e) => e.birthday = birthday,
+            None => return Ok(()),
+        }
+        self.persist()
+    }
+
     /// Adds a wallet the core has on disk but this registry never saw; true if added.
     pub fn discover(&mut self, network: &str, group: &str, family: &str) -> Result<bool, String> {
         if group.is_empty() || self.get(network, group).is_some() {
@@ -131,6 +140,9 @@ mod tests {
         let e = r.get("signet", "g_1").unwrap();
         assert_eq!((e.label.as_str(), e.birthday["height"].as_u64(), e.first_opened, e.last_opened), ("Savings", Some(5), 1, 9));
         assert!(!r.discover("signet", "g_1", "bitcoin").unwrap(), "already known");
+        r.set_birthday("signet", "g_1", json!({"height": 7, "source": "set"})).unwrap();
+        let e = r.get("signet", "g_1").unwrap();
+        assert_eq!((e.birthday["source"].as_str(), e.last_opened, e.label.as_str()), (Some("set"), 9, "Savings"));
         assert!(r.discover("signet", "g_2", "bitcoin_taproot").unwrap());
     }
 
