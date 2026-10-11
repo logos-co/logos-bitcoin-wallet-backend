@@ -137,12 +137,29 @@ pub enum CoreView<'a> {
     Gone { wallet_open: bool, history: Option<Seen>, readable: bool },
 }
 
-/// Whether the txid is in the wallet's history, and whether a source or a block vouches for it.
+/// What the wallet's history says about a txid: absent; present but unreported; vouched for by a
+/// source or a block; broadcast by the core's own send record; confirmed on the authority's chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Seen {
     Absent,
     Unreported,
     Vouched,
+    Recorded,
+    Confirmed,
+}
+
+/// Reads a history row: the core's own record and the authority's chain before any source.
+pub fn seen_in(row: &Value) -> Seen {
+    let record = row["sendState"].as_str().unwrap_or_default();
+    if record == "confirmed" || row["state"] == "confirmed" {
+        Seen::Confirmed
+    } else if row["confirmations"].as_u64().unwrap_or(0) > 0 || !row["reportedBy"].is_null() {
+        Seen::Vouched
+    } else if matches!(record, "sent" | "replaced") {
+        Seen::Recorded
+    } else {
+        Seen::Unreported
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -178,6 +195,8 @@ pub struct Send {
     pub resign_tried: bool,
     pub unreported_since: Option<Instant>,
     pub abandoned: bool,
+    /// Settled from the wallet's history after a restart, not from the core's answer.
+    pub reconciled: bool,
     pub awaiting_since: Option<Instant>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -279,6 +298,7 @@ impl Sends {
                 resign_tried: false,
                 unreported_since: None,
                 abandoned: false,
+                reconciled: false,
                 awaiting_since: None,
                 created_at: now,
                 updated_at: now,
@@ -504,10 +524,13 @@ impl Sends {
                 let s = self.get_mut(id).expect("present");
                 let settled = match (wallet_open, history) {
                     (true, None) | (true, Some(_)) if !readable => return (None, Next::Nothing),
-                    (true, Some(Seen::Vouched)) => {
+                    (true, Some(Seen::Confirmed | Seen::Vouched)) => {
                         s.broadcast = "seen".into();
                         Some((State::Sent, String::new(), String::new()))
                     }
+                    // The core recorded its own broadcast: sent, as its answer would have said. Kyoto reports nothing.
+                    (true, Some(Seen::Recorded)) => Some((State::Sent, String::new(), String::new())),
+                    // A core without send records: a source must report it.
                     (true, Some(Seen::Unreported)) => {
                         let since = *s.unreported_since.get_or_insert(now);
                         (now.saturating_duration_since(since) >= REPORT_GRACE).then(|| (State::Unknown, MAY_HAVE_LEFT.to_string(), String::new()))
@@ -528,11 +551,45 @@ impl Sends {
                     }),
                 };
                 match settled {
-                    Some((st, why, c)) => (Self::settle(s, st, why, c), Next::Nothing),
+                    Some((st, why, c)) => {
+                        s.reconciled = true;
+                        (Self::settle(s, st, why, c), Next::Nothing)
+                    }
                     None => (None, Next::Nothing),
                 }
             }
         }
+    }
+
+    /// Final sends of this wallet the history may still show went out: unknown ones, and those a
+    /// restart settled without the core's answer. `(id, txid)`; a newer send with the txid wins.
+    pub fn unsettled(&self, network: &str, group: &str) -> Vec<(String, String)> {
+        self.map
+            .values()
+            .filter(|s| s.state.is_final() && s.state != State::Sent && (s.state == State::Unknown || s.reconciled))
+            .filter(|s| !s.txid.is_empty() && s.network == network && s.group == group)
+            .filter(|s| self.by_txid(&s.txid) == Some(s.id.as_str()))
+            .map(|s| (s.id.clone(), s.txid.clone()))
+            .collect()
+    }
+
+    /// Confirmed is sent, whatever the send read before. A reconciled, unabandoned send is sent once the
+    /// core's record or a source vouches for it too; an unknown the core reported waits for a block.
+    pub fn upgrade(&mut self, id: &str, seen: Seen) -> Option<State> {
+        let s = self.map.get(&num(id)?).filter(|s| s.state.is_final() && s.state != State::Sent)?;
+        let sent = match seen {
+            Seen::Confirmed => true,
+            Seen::Recorded | Seen::Vouched => s.reconciled && !s.abandoned,
+            Seen::Absent | Seen::Unreported => false,
+        };
+        if !sent {
+            return None;
+        }
+        let s = self.get_mut(id)?;
+        if seen != Seen::Recorded {
+            s.broadcast = "seen".into();
+        }
+        Self::settle(s, State::Sent, String::new(), String::new())
     }
 
     /// Sends whose offer nobody acknowledged within the keystore's window plus slack.
@@ -632,7 +689,7 @@ impl Sends {
                     "approval": s.approval, "broadcast": s.broadcast, "via": s.via,
                     "withdrawal": s.withdrawal.as_ref().map(Withdrawal::to_wire), "previewCancelled": s.preview_cancelled,
                     "cancelError": s.cancel_error, "sawSettled": s.saw_settled, "sawBroadcasting": s.saw_broadcasting,
-                    "signStarted": s.sign_started, "abandoned": s.abandoned, "createdAt": s.created_at,
+                    "signStarted": s.sign_started, "abandoned": s.abandoned, "reconciled": s.reconciled, "createdAt": s.created_at,
                     "updatedAt": s.updated_at, "rebroadcasts": s.rebroadcasts,
                 })
             })
@@ -678,6 +735,7 @@ impl Sends {
                     resign_tried: false,
                     unreported_since: None,
                     abandoned: s["abandoned"] == true,
+                    reconciled: s["reconciled"] == true,
                     awaiting_since: (state == State::AwaitingApproval).then_some(now),
                     created_at: s["createdAt"].as_u64().unwrap_or(0),
                     updated_at: s["updatedAt"].as_u64().unwrap_or(0),
@@ -1089,7 +1147,13 @@ mod tests {
         let id = started(&mut s);
         s.observe(&id, "awaiting_approval", Some("smh_1"), now);
         let g = |open, h, readable| CoreView::Gone { wallet_open: open, history: h, readable };
-        // In history but unreported: wait for a source, then unknown.
+        // The core's record says it broadcast it, or the chain has it: sent at once.
+        for seen in [Seen::Recorded, Seen::Confirmed, Seen::Vouched] {
+            let mut r = reloaded(&s);
+            assert_eq!(r.reconcile(&id, g(true, Some(seen), true), now).0, Some(State::Sent), "{seen:?}");
+            assert!(r.get(&id).unwrap().reconciled);
+        }
+        // A core without send records, and no source reports it: wait for one, then unknown.
         let mut r = reloaded(&s);
         assert_eq!(r.reconcile(&id, g(true, Some(Seen::Unreported), true), now).0, None);
         assert_eq!(r.reconcile(&id, g(true, Some(Seen::Unreported), true), now + REPORT_GRACE).0, Some(State::Unknown));
@@ -1123,6 +1187,88 @@ mod tests {
         assert_eq!(r.reconcile(&id5, CoreView::Preview { state: "awaiting_approval:rendered", handle: None }, now).1, Next::CancelPreview("p1".into()));
         assert_eq!(r.cancel_failed(&id5, "unknown or settled preview"), None, "it may have been signed: reconciling decides");
         assert_eq!(r.reconcile(&id5, g(true, Some(Seen::Absent), true), now).0, Some(State::Cancelled));
+    }
+
+    #[test]
+    fn history_rows_are_read_core_record_first() {
+        let seen = |v: Value| seen_in(&v);
+        assert_eq!(seen(json!({"state": "confirmed", "confirmations": 3, "sendState": "sent"})), Seen::Confirmed);
+        assert_eq!(seen(json!({"state": "sent", "confirmations": 0, "sendState": "confirmed"})), Seen::Confirmed);
+        assert_eq!(seen(json!({"state": "confirmed", "confirmations": 1, "sendState": "abandoned"})), Seen::Confirmed, "it confirmed anyway");
+        assert_eq!(seen(json!({"state": "waiting", "confirmations": 1, "sendState": "sent"})), Seen::Vouched, "above the authority's tip: a server's word");
+        assert_eq!(seen(json!({"state": "sent", "confirmations": 0, "reportedBy": ["electrum-0"], "sendState": "sent"})), Seen::Vouched);
+        assert_eq!(seen(json!({"state": "sent", "confirmations": 0, "reportedBy": null, "sendState": "sent"})), Seen::Recorded);
+        assert_eq!(seen(json!({"state": "replaced", "confirmations": 0, "sendState": "replaced"})), Seen::Recorded);
+        assert_eq!(seen(json!({"state": "sent", "confirmations": 0, "sendState": "broadcasting"})), Seen::Unreported, "the core can't tell either");
+        assert_eq!(seen(json!({"state": "sent", "confirmations": 0})), Seen::Unreported, "a core without send records");
+    }
+
+    #[test]
+    fn a_send_approved_after_a_restart_is_sent_on_the_core_record() {
+        // Kyoto as the authority: it broadcasts `requested` and no source ever reports the transaction.
+        let now = Instant::now();
+        let mut s = Sends::default();
+        let id = started(&mut s);
+        s.observe(&id, "awaiting_approval", Some("smh_1"), now);
+        let mut r = reloaded(&s);
+        assert_eq!(r.reconcile(&id, CoreView::Preview { state: "awaiting_approval:rendered", handle: Some("smh_1") }, now), (None, Next::Nothing));
+        assert_eq!(r.reconcile(&id, CoreView::Preview { state: "broadcasting", handle: None }, now).0, Some(State::Committing));
+        let row = json!({"txid": "ab".repeat(32), "state": "sent", "confirmations": 0, "reportedBy": null, "sendState": "sent"});
+        let gone = CoreView::Gone { wallet_open: true, history: Some(seen_in(&row)), readable: true };
+        assert_eq!(r.reconcile(&id, gone, now).0, Some(State::Sent), "no wait for a source");
+        let st = r.status_json(&id);
+        assert_eq!((st["state"].clone(), st["error"].clone(), st["errorCode"].clone()), (json!("sent"), Value::Null, Value::Null));
+        assert!(r.unsettled("regtest", "g_1").is_empty());
+    }
+
+    #[test]
+    fn an_unknown_or_reconciled_send_is_sent_once_it_confirms() {
+        let ab = "ab".repeat(32);
+        let mut s = Sends::default();
+        let id = started(&mut s);
+        s.signed(&id, &json!({"txid": ab, "broadcast": "unknown", "via": "kyoto"}));
+        assert_eq!(s.unsettled("regtest", "g_1"), vec![(id.clone(), ab.clone())]);
+        assert!(s.unsettled("regtest", "g_2").is_empty(), "another wallet's history says nothing of it");
+        // The core said unknown: neither its record nor a source settles that, only the chain.
+        for seen in [Seen::Absent, Seen::Unreported, Seen::Recorded, Seen::Vouched] {
+            assert_eq!(s.upgrade(&id, seen), None, "{seen:?}");
+        }
+        assert_eq!(s.upgrade(&id, Seen::Confirmed), Some(State::Sent));
+        let st = s.status_json(&id);
+        assert_eq!((st["state"].clone(), st["error"].clone(), st["broadcast"].clone()), (json!("sent"), Value::Null, json!("seen")));
+        assert!(st.get("offer").is_none() && s.unsettled("regtest", "g_1").is_empty());
+        // Abandoned, then confirmed anyway: it went out.
+        let mut s = Sends::default();
+        let id = started(&mut s);
+        s.signed(&id, &json!({"txid": ab, "broadcast": "unknown"}));
+        s.abandoned(&id);
+        assert_eq!(s.upgrade(&id, Seen::Confirmed), Some(State::Sent));
+        // Settled unknown by a restart while its wallet was closed: the core's record decides once it is open.
+        let now = Instant::now();
+        let mut s = Sends::default();
+        let id = started(&mut s);
+        s.observe(&id, "awaiting_approval", Some("smh_1"), now);
+        let mut r = reloaded(&s);
+        assert_eq!(r.reconcile(&id, CoreView::Gone { wallet_open: false, history: None, readable: true }, now).0, Some(State::Unknown));
+        let mut r = reloaded(&r);
+        assert_eq!(r.unsettled("regtest", "g_1").len(), 1, "it survives another restart");
+        assert_eq!(r.upgrade(&id, Seen::Unreported), None);
+        assert_eq!(r.upgrade(&id, Seen::Recorded), Some(State::Sent));
+        // Failed by a restart, then confirmed: it went out after all.
+        let mut r = reloaded(&s);
+        assert_eq!(r.reconcile(&id, CoreView::Gone { wallet_open: true, history: Some(Seen::Absent), readable: true }, now).0, Some(State::Failed));
+        assert_eq!(r.upgrade(&id, Seen::Confirmed), Some(State::Sent));
+        // A failure the core reported is not followed, nor a send whose txid a newer send took.
+        let mut s = Sends::default();
+        let id = started(&mut s);
+        s.sign_failed(&id, "rejected: the person declined", Some("rejected"));
+        assert!(s.unsettled("regtest", "g_1").is_empty());
+        let mut s = Sends::default();
+        let id = started(&mut s);
+        s.signed(&id, &json!({"txid": ab, "broadcast": "unknown"}));
+        let again = s.begin(Kind::Send, "x", "regtest", "g_1", json!({}), 2).unwrap();
+        s.built(&again, preview("p2"));
+        assert!(s.unsettled("regtest", "g_1").is_empty(), "the newer send follows that transaction");
     }
 
     #[test]

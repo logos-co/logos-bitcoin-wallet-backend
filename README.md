@@ -76,7 +76,8 @@ wallet open, in the core.
   it and fails it.
 - `unknown` means the transaction may have left. `send_status` offers `rebroadcast`,
   `request_fee_bump` and `abandon_send`; never a new send from other coins while it could still
-  confirm. A rebroadcast the network has seen moves it to `sent`. `abandon_send({ txid })`
+  confirm. A rebroadcast the network has seen moves it to `sent`, and so does the core's history
+  showing the transaction confirmed on the authority's chain, abandoned or not. `abandon_send({ txid })`
   (custodian, `unknown` only) has the core free its coins and marks the send `abandoned`: if the
   original still confirms, a later send from those coins fails, or replaces it if it confirms first.
 - A failed or cancelled send carries `errorCode`: the core's `rejected`, `expired`, `cancelled`,
@@ -85,9 +86,15 @@ wallet open, in the core.
   sends no code is read by its error text.
 - Sends are kept in `sends.json`, which holds no receipt, key or password. After a restart an
   open send is reconciled with the core: a preview still awaiting approval is followed, one built
-  but never signed is signed, and one the core no longer has is settled from the wallet's history
-  (`sent` once a block or a source vouches for it, `unknown` if it may have left, otherwise
-  `failed` with `backend_restarted`).
+  but never signed is signed, and one the core no longer has is settled from the wallet's history.
+  The core's own send record comes first: `sendState` `confirmed`, `sent` or `replaced` means the
+  core broadcast it, and the send is `sent` at once, with no wait for a source (Kyoto reports no
+  mempool). Then a block or a source vouching for it is `sent`; a core without send records waits
+  30 s for a source, then `unknown`; one seen broadcasting that the history lacks is `unknown`;
+  otherwise `failed` with `backend_restarted`. A send settled this way moves to `sent` later once
+  the history shows the record, a source or, if abandoned, a block. Settled from the record alone
+  it shows no `broadcast` or `via`: history rows don't carry the outcome, so a core `unknown`
+  missed during a restart reads `sent`.
 - `cancel_send` (the requester or a custodian) withdraws the approval request and unlocks the
   inputs. It is refused once the transaction is going out, and `close_wallet` withdraws open
   sends first.

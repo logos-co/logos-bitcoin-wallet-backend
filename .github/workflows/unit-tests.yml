@@ -63,6 +63,8 @@ jobs:
                    codes_decide_and_text_is_the_fallback \
                    sends_survive_a_restart_and_hold_no_secret \
                    a_loaded_send_the_core_no_longer_has \
+                   a_send_approved_after_a_restart_is_sent_on_the_core_record \
+                   an_unknown_or_reconciled_send_is_sent_once_it_confirms \
                    a_birthday_is_a_day_or_a_height \
                    absent_heights_are_no_percentage \
                    an_offer_nobody_acknowledges_is_withdrawn_after_the_window \

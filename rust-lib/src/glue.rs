@@ -1,7 +1,7 @@
 //! Logos glue for `bitcoin_wallet_backend` (rust-first, `concurrency: "multi"`). A reactor
 //! follows the core's jobs and sends, and tells the node module which network has a wallet open.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError};
@@ -539,24 +539,27 @@ fn save_sends(inner: &Shared) {
     }
 }
 
-/// Whether the open wallet's history has `txid`, and whether a block or a source vouches for it.
-/// `(None, false)` while the wallet is busy.
-fn history_seen(txid: &str) -> (Option<Seen>, bool) {
+/// What the open wallet's history says of each txid, from the newest 200 rows; None while it is busy.
+fn history_of(txids: &[&str]) -> Option<BTreeMap<String, Seen>> {
+    let mut out: BTreeMap<String, Seen> = txids.iter().map(|t| (t.to_string(), Seen::Absent)).collect();
+    let mut left = out.len();
     for page in 0..4i64 {
-        let Ok(h) = ipc!(core(), history_async_with_timeout, READ, page).and_then(|s| parse(s, "wallet core")) else { return (None, false) };
+        let h = ipc!(core(), history_async_with_timeout, READ, page).and_then(|s| parse(s, "wallet core")).ok()?;
         if h["ok"] != true || h["busy"] == true {
-            return (None, false);
+            return None;
         }
         let rows = h["rows"].as_array().cloned().unwrap_or_default();
-        if let Some(r) = rows.iter().find(|r| r["txid"] == txid) {
-            let vouched = r["confirmations"].as_u64().unwrap_or(0) > 0 || !r["reportedBy"].is_null();
-            return (Some(if vouched { Seen::Vouched } else { Seen::Unreported }), true);
+        for r in &rows {
+            if let Some(seen) = r["txid"].as_str().and_then(|t| out.get_mut(t)).filter(|s| **s == Seen::Absent) {
+                *seen = sends::seen_in(r);
+                left -= 1;
+            }
         }
-        if rows.len() < 50 {
+        if left == 0 || rows.len() < 50 {
             break;
         }
     }
-    (Some(Seen::Absent), true)
+    Some(out)
 }
 
 /// Reconciles the sends loaded from sends.json, which no job of this instance follows, with the core.
@@ -580,7 +583,11 @@ fn follow_orphans(inner: &Shared) {
             None => {
                 let Some(st) = status.get_or_insert_with(|| core_status().ok()).clone() else { continue };
                 let open = matches!(st["state"].as_str(), Some("syncing" | "ready")) && st["network"] == net.as_str() && st["group"] == group.as_str();
-                let (history, readable) = if open && !txid.is_empty() { history_seen(&txid) } else { (Some(Seen::Absent), true) };
+                let (history, readable) = match (open && !txid.is_empty()).then(|| history_of(&[txid.as_str()])) {
+                    Some(Some(h)) => (h.get(&txid).copied(), true),
+                    Some(None) => (None, false),
+                    None => (Some(Seen::Absent), true),
+                };
                 let view = CoreView::Gone { wallet_open: open, history: if open { history } else { None }, readable };
                 lock(inner).sends.reconcile(&id, view, now)
             }
@@ -596,6 +603,21 @@ fn follow_orphans(inner: &Shared) {
             Next::CancelPreview(pid) => cancel_preview(inner, &id, &pid),
             _ => {}
         }
+    }
+}
+
+/// Moves an unknown or reconciled send of the open wallet to sent once its history shows it went out.
+fn follow_confirmations(inner: &Shared, status: &Value) {
+    let (Some(net), Some(group)) = (status["network"].as_str(), status["group"].as_str()) else { return };
+    let unsettled = lock(inner).sends.unsettled(net, group);
+    if unsettled.is_empty() {
+        return;
+    }
+    let txids: Vec<&str> = unsettled.iter().map(|(_, t)| t.as_str()).collect();
+    let Some(seen) = history_of(&txids) else { return };
+    for (id, txid) in &unsettled {
+        let st = seen.get(txid).and_then(|s| lock(inner).sends.upgrade(id, *s));
+        emit_changed(id, st);
     }
 }
 
@@ -713,6 +735,7 @@ fn slow_tick(inner: &Shared, check_node: bool) {
             }
         }
         check_coins(inner);
+        follow_confirmations(inner, &status);
     }
 }
 
