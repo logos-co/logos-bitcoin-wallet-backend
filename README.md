@@ -119,7 +119,9 @@ doubling to 5 s, and stops once unload begins.
 Reads pass through with display amounts (`…Btc`, eight decimals) and `syncPercent`, counted
 from the wallet's birthday and absent while a height is unknown. Everything else the core says
 passes as it is: `lastReorg`, `rescanFrom`, `birthdaySource`, `node`, `kyoto` and the authority's
-kind in `wallet_status`; `blockHash` and `sendState` on history rows; `authority_suspect` alerts. A busy core answers empty
+`kind` and `base` in `wallet_status`; `blockHash`, `sendState`, `confirmedVia` and the `unchecked`
+state on history rows; `authority_suspect` and `unchecked_anchor` alerts. `balances` gives
+`unchecked` its `uncheckedBtc` twin like every other amount. A busy core answers empty
 amounts, never zero. `format_btc` and `parse_btc` are exact; more than eight decimals is
 refused. Long operations answer a backend job id (`job_status`); the core's receipts never
 leave this module. Events: `wallet_state_changed`, `sync_progress`, `balance_changed`,

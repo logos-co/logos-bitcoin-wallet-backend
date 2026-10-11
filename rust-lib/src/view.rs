@@ -62,7 +62,7 @@ pub fn sync_view(status: &Value) -> Value {
     })
 }
 
-const BALANCE_KEYS: [&str; 5] = ["confirmed", "waiting", "pending", "sent", "immature"];
+const BALANCE_KEYS: [&str; 6] = ["confirmed", "waiting", "unchecked", "pending", "sent", "immature"];
 
 pub fn balance_view(mut b: Value) -> Value {
     for k in BALANCE_KEYS {
@@ -81,7 +81,7 @@ pub fn balance_digest(b: &Value) -> Option<String> {
     if b["ok"] != true || b["busy"] == true {
         return None;
     }
-    Some(json!([b["confirmed"], b["waiting"], b["pending"], b["sent"], b["immature"], b["tooSmall"]]).to_string())
+    Some(json!([b["confirmed"], b["waiting"], b["unchecked"], b["pending"], b["sent"], b["immature"], b["tooSmall"]]).to_string())
 }
 
 pub fn history_view(mut h: Value) -> Value {
@@ -147,6 +147,29 @@ mod tests {
         assert_eq!((b["confirmedBtc"].clone(), b["pendingBtc"].clone(), b["tooSmall"]["btc"].clone()),
                    (json!("1.50000000"), json!("0.00002100"), json!("0.00000300")));
         assert!(balance_digest(&b).is_some());
+    }
+
+    #[test]
+    fn restore_fields_pass_through_and_unchecked_gains_its_twin() {
+        let b = balance_view(json!({"ok": true, "busy": false, "confirmed": "100", "waiting": "0", "unchecked": "2500", "pending": "0",
+                                    "sent": "0", "immature": "0", "tooSmall": {"count": 0, "sat": "0"}}));
+        assert_eq!((b["unchecked"].clone(), b["uncheckedBtc"].clone()), (json!("2500"), json!("0.00002500")));
+        let before = balance_digest(&b);
+        let mut more = b.clone();
+        more["unchecked"] = json!("2600");
+        assert_ne!(balance_digest(&more), before, "a change in unchecked is a balance change");
+        let busy = balance_view(json!({"ok": true, "busy": true, "unchecked": ""}));
+        assert_eq!(busy["uncheckedBtc"], "", "unread stays unread");
+        let st = json!({"state": "ready", "authority": {"height": 10, "kind": "kyoto", "base": 0},
+                        "kyoto": {"rescans": 1, "window": {"from": 0, "to": 10}, "lastConflict": {"at": 5, "peers": 2}, "quorum": 2, "onePeerDecides": false},
+                        "node": {"rescans": 0, "window": null}, "walletTip": 10});
+        let v = status_view(st.clone(), "regtest", None, None);
+        for (k, sub) in [("authority", "base"), ("kyoto", "rescans"), ("kyoto", "window"), ("kyoto", "lastConflict"), ("kyoto", "quorum"), ("kyoto", "onePeerDecides"), ("node", "rescans"), ("node", "window")] {
+            assert_eq!(v[k][sub], st[k][sub], "{k}.{sub} passes unchanged");
+        }
+        let h = history_view(json!({"ok": true, "rows": [{"txid": "a", "state": "unchecked", "amountSat": "2500", "feeSat": null, "confirmedVia": "b", "height": null}]}));
+        assert_eq!((h["rows"][0]["state"].clone(), h["rows"][0]["confirmedVia"].clone(), h["rows"][0]["height"].clone()), (json!("unchecked"), json!("b"), Value::Null));
+        assert_eq!(h["rows"][0]["amountBtc"], "0.00002500");
     }
 
     #[test]
