@@ -7,6 +7,7 @@ pub mod jobs;
 pub mod registry;
 pub mod request;
 pub mod sends;
+pub mod switch;
 pub mod view;
 
 #[cfg(feature = "logos_module")]
@@ -59,7 +60,7 @@ mod contract {
                 assert_eq!(banned(p), None, "{m}({p}) is named like a secret");
             }
         }
-        let fields = [crate::request::OPEN_FIELDS, crate::request::SEND_FIELDS, crate::request::RECIPIENT_FIELDS, crate::request::BUMP_FIELDS, crate::request::ABANDON_FIELDS, crate::request::BIRTHDAY_FIELDS, crate::request::PROBE_FIELDS, crate::gate::ROLES_FIELDS];
+        let fields = [crate::request::OPEN_FIELDS, crate::request::SEND_FIELDS, crate::request::RECIPIENT_FIELDS, crate::request::BUMP_FIELDS, crate::request::ABANDON_FIELDS, crate::request::BIRTHDAY_FIELDS, crate::request::PROBE_FIELDS, crate::request::OWN_PEERS_FIELDS, crate::request::PEER_LIST_FIELDS, crate::gate::ROLES_FIELDS];
         for f in fields.iter().flat_map(|f| f.iter()) {
             assert_eq!(banned(f), None, "the field {f} is named like a secret");
         }

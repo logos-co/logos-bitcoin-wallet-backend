@@ -17,6 +17,7 @@ use crate::jobs::{Jobs, Purpose};
 use crate::registry::Registry;
 use crate::request;
 use crate::sends::{self, CoreView, Kind, Next, Seen, Sends, Withdrawal};
+use crate::switch::{self, Switch};
 use crate::view;
 use crate::{amount, now_secs, write_atomic};
 
@@ -28,9 +29,10 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     /// role, and the file a headless operator writes to enrol a module.
     fn caller_identity(&self) -> String;
 
-    /// `{ ok, networks, active }`.
+    /// `{ ok, networks, active, pending }`; `pending` is a switch waiting for a close to settle.
     fn list_networks(&self) -> String;
-    /// CUSTODIAN. Refused while a wallet or a send is open.
+    /// CUSTODIAN. While a close settles the switch is queued: `{ ok, active, pending }`, and opens are
+    /// refused with code busy until it applies. Refusals carry `code`: busy, wallet_open, send_open.
     fn set_active_network(&self, network: String) -> String;
     /// `{ ok, active, wallets: [{ group, family, network, label, birthday, firstOpened, lastOpened }] }`:
     /// wallets opened before, newest first. No secrets.
@@ -83,6 +85,11 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     fn set_proxy(&self, proxy: String) -> String;
     /// CUSTODIAN. Clears a suspect mark in the node module and, with a wallet open, in the core.
     fn clear_suspect(&self, source_id: String) -> String;
+    /// CUSTODIAN. `{ network, peers: [host[:port]] }`, at most 64: Kyoto's own peers, which replace the
+    /// curated list (`[]` restores it). Refused while a wallet is open. Answers as peer_list.
+    fn set_own_peers(&self, params_json: String) -> String;
+    /// CUSTODIAN. `{ network? }`: the node module's peer list, with `ownPeers` and `usable`.
+    fn peer_list(&self, params_json: String) -> String;
 
     /// Any named module. `{ recipients: [{ address, amountSat | amountBtc }], feeRate? | target?,
     /// sendMax? }` → `{ ok, requestId }`. One open send per wallet.
@@ -135,6 +142,8 @@ const PROBE: Duration = Duration::from_secs(17);
 const TICK: Duration = Duration::from_millis(500);
 
 static UNLOADING: AtomicBool = AtomicBool::new(false);
+/// Calls that got no answer; the reactor backs off while they climb.
+static UNANSWERED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Waits for an async reply on this thread. A blocking call would wait in a nested event loop
 /// on the main thread, where concurrent calls return innermost first. Unload answers at once.
@@ -144,11 +153,15 @@ fn wait<T>(rx: Receiver<Result<T, LogosError>>, budget: Duration) -> Result<T, S
         if UNLOADING.load(Ordering::SeqCst) {
             return Err("unloading".into());
         }
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(r) => return r.map_err(|e| e.to_string()),
+        let r = match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(r) => r.map_err(|e| e.to_string()),
             Err(RecvTimeoutError::Timeout) if start.elapsed() < budget + Duration::from_secs(1) => continue,
-            Err(_) => return Err("no answer".into()),
+            Err(_) => Err("no answer".into()),
+        };
+        if r.is_err() && !UNLOADING.load(Ordering::SeqCst) {
+            UNANSWERED.fetch_add(1, Ordering::SeqCst);
         }
+        return r;
     }
 }
 
@@ -175,6 +188,31 @@ fn node() -> &'static NodeClient {
 
 fn refused() -> String {
     gate::NOT_AUTHORIZED.into()
+}
+
+/// A refusal with a code the app can act on.
+fn coded(code: &str, e: impl std::fmt::Display) -> String {
+    json!({"ok": false, "error": e.to_string(), "code": code}).to_string()
+}
+
+/// Applies a switch queued behind a close, once nothing is open or settling.
+fn apply_pending_switch(inner: &Shared, status: &Value) {
+    let applied = {
+        let mut g = lock(inner);
+        let Some(net) = g.pending_network.clone() else { return };
+        if !switch::applies(view::wallet_open(status), g.jobs.lifecycle_pending().is_some()) {
+            return;
+        }
+        g.active = net.clone();
+        g.pending_network = None;
+        if let Some(dir) = g.dir.clone() {
+            if let Err(e) = write_atomic(&dir.join("settings.json"), json!({"activeNetwork": net}).to_string().as_bytes()) {
+                eprintln!("bitcoin_wallet_backend: settings.json: {e}");
+            }
+        }
+        view::status_view(status.clone(), &g.active, None, g.sends.any_open())
+    };
+    emit_wallet_state_changed(&applied.to_string());
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -231,6 +269,8 @@ struct Inner {
     regtest: bool,
     /// The network the node module was last told has a wallet open.
     asserted: Option<String>,
+    /// A switch asked for while a close settled; applied once it has.
+    pending_network: Option<String>,
     node_ready: bool,
     last_sync: String,
     last_balance: Option<String>,
@@ -246,6 +286,7 @@ impl Default for Inner {
             dir: None,
             regtest: false,
             asserted: None,
+            pending_network: None,
             node_ready: false,
             last_sync: String::new(),
             last_balance: None,
@@ -414,6 +455,9 @@ fn finish(inner: &Shared, jid: &str, state: &str, result: Value, error: String, 
         }
         Purpose::Close { network } => {
             set_wallet_open(inner, &network, false);
+            if let Ok(st) = core_status() {
+                apply_pending_switch(inner, &st);
+            }
             emit_job_finished(jid, state);
         }
         Purpose::Build { request } => {
@@ -642,6 +686,7 @@ fn slow_tick(inner: &Shared, check_node: bool) {
     ensure_node(inner);
     let Ok(status) = core_status() else { return };
     assert_wallet_open(inner, &status, check_node);
+    apply_pending_switch(inner, &status);
     let sync = view::sync_view(&status);
     let digest = json!([sync["state"], sync["network"], sync["walletTip"], sync["authorityHeight"], sync["percent"], sync["synced"]]).to_string();
     let changed = {
@@ -682,7 +727,9 @@ fn reactor(inner: Shared) {
     // Calls out wait until the host has finished wiring this module.
     nap(Duration::from_millis(500));
     let mut tick: u64 = 0;
+    let mut pause = None;
     while !UNLOADING.load(Ordering::SeqCst) {
+        let before = UNANSWERED.load(Ordering::SeqCst);
         follow_jobs(&inner);
         follow_sends(&inner);
         follow_orphans(&inner);
@@ -692,13 +739,16 @@ fn reactor(inner: Shared) {
         }
         save_sends(&inner);
         tick += 1;
-        nap(TICK);
+        // A module that stopped answering is asked again after 100 ms, doubling to 5 s.
+        pause = switch::backoff(pause, UNANSWERED.load(Ordering::SeqCst) > before);
+        nap(pause.unwrap_or(TICK).max(TICK));
     }
 }
 
 /// Relays one of the core's events while this module is loaded, resubscribing if it drops.
 fn listen(name: &'static str, inner: Shared) {
     nap(Duration::from_millis(700));
+    let mut pause = None;
     while !UNLOADING.load(Ordering::SeqCst) {
         let mut c = CoreClient::new();
         let sub = match name {
@@ -706,9 +756,11 @@ fn listen(name: &'static str, inner: Shared) {
             _ => c.on_source_alert(),
         };
         let Ok(sub) = sub else {
-            nap(Duration::from_secs(5));
+            pause = switch::backoff(pause, true);
+            nap(pause.unwrap_or_default());
             continue;
         };
+        pause = None;
         while !UNLOADING.load(Ordering::SeqCst) && !sub.is_dead() {
             let Ok(ev) = sub.receiver().recv_timeout(Duration::from_millis(200)) else { continue };
             if UNLOADING.load(Ordering::SeqCst) {
@@ -812,7 +864,7 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
 
     fn list_networks(&self) -> String {
         let g = lock(&self.inner);
-        ok(json!({"networks": request::networks(g.regtest), "active": g.active}))
+        ok(json!({"networks": request::networks(g.regtest), "active": g.active, "pending": g.pending_network}))
     }
 
     fn set_active_network(&self, network: String) -> String {
@@ -824,25 +876,31 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
         }
         let st = match core_status() {
             Ok(s) => s,
-            Err(e) => return err(format!("can't tell whether a wallet is open: {e}")),
+            Err(e) => return coded("busy", format!("can't tell whether a wallet is open: {e}")),
         };
-        if view::wallet_open(&st) {
-            return err("close the open wallet before switching networks");
-        }
         let mut g = lock(&self.inner);
-        if g.jobs.lifecycle_pending().is_some() {
-            return err("a wallet is opening or closing");
+        if network == g.active {
+            g.pending_network = None;
+            return ok(json!({"active": network, "pending": null}));
         }
-        if let Some(s) = g.sends.any_open() {
-            return err(format!("send {s} is still open"));
-        }
-        g.active = network.clone();
-        if let Some(dir) = g.dir.clone() {
-            if let Err(e) = write_atomic(&dir.join("settings.json"), json!({"activeNetwork": network}).to_string().as_bytes()) {
-                eprintln!("bitcoin_wallet_backend: settings.json: {e}");
+        let closing = g.jobs.close_pending() || st["state"] == "closing";
+        match switch::plan(view::wallet_open(&st), closing, g.jobs.open_pending(), g.sends.any_open()) {
+            Switch::Refuse(code, why) => coded(code, why),
+            Switch::Queue => {
+                g.pending_network = Some(network.clone());
+                ok(json!({"active": g.active, "pending": network}))
+            }
+            Switch::Now => {
+                g.active = network.clone();
+                g.pending_network = None;
+                if let Some(dir) = g.dir.clone() {
+                    if let Err(e) = write_atomic(&dir.join("settings.json"), json!({"activeNetwork": network}).to_string().as_bytes()) {
+                        eprintln!("bitcoin_wallet_backend: settings.json: {e}");
+                    }
+                }
+                ok(json!({"active": network, "pending": null}))
             }
         }
-        ok(json!({"active": network}))
     }
 
     fn list_wallets(&self) -> String {
@@ -863,10 +921,14 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
         if !self.custodian("open_wallet", &caller()) {
             return refused();
         }
-        let (active, regtest) = {
+        let (active, regtest, pending) = {
             let g = lock(&self.inner);
-            (g.active.clone(), g.regtest)
+            (g.active.clone(), g.regtest, g.pending_network.clone())
         };
+        // Never open on the old network while a switch waits for a close to settle.
+        if let Some(n) = pending {
+            return coded("busy", format!("switching to {n} once the wallet has closed; try again"));
+        }
         let p = match request::parse_open(&params_json, &active, regtest) {
             Ok(p) => p,
             Err(e) => return err(e),
@@ -877,7 +939,7 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
             Err(e) => return err(format!("the wallet core did not answer: {e}")),
         }
         if lock(&self.inner).jobs.lifecycle_pending().is_some() {
-            return err("a wallet is opening or closing");
+            return coded("busy", "a wallet is opening or closing; try again");
         }
         // Locks the network's source settings for as long as the wallet is open.
         set_wallet_open(&self.inner, &p.network, true);
@@ -1078,6 +1140,33 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
             out["wallet"] = w;
         }
         out.to_string()
+    }
+
+    fn set_own_peers(&self, params_json: String) -> String {
+        if !self.custodian("set_own_peers", &caller()) {
+            return refused();
+        }
+        let regtest = lock(&self.inner).regtest;
+        let (network, peers) = match request::parse_own_peers(&params_json, regtest) {
+            Ok(p) => p,
+            Err(e) => return err(e),
+        };
+        match self.settings_unlocked() {
+            Ok(_) => relay(ipc!(node(), set_own_peers_async_with_timeout, WRITE, &network, &peers), "bitcoin_node_module"),
+            Err(e) => err(e),
+        }
+    }
+
+    fn peer_list(&self, params_json: String) -> String {
+        if !self.custodian("peer_list", &caller()) {
+            return refused();
+        }
+        let regtest = lock(&self.inner).regtest;
+        let network = match request::parse_peer_list(&params_json, regtest) {
+            Ok(n) => n.unwrap_or_else(|| self.effective_network().0),
+            Err(e) => return err(e),
+        };
+        relay(ipc!(node(), peer_list_async_with_timeout, READ, &network), "bitcoin_node_module")
     }
 
     fn request_send(&self, request_json: String) -> String {

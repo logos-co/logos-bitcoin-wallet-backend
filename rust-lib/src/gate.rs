@@ -144,6 +144,8 @@ pub const CUSTODIAN_METHODS: &[&str] = &[
     "rebroadcast",
     "abandon_send",
     "set_birthday",
+    "set_own_peers",
+    "peer_list",
 ];
 
 /// Any named module may ask for a send; the person approves it in the signer app.

@@ -18,6 +18,10 @@ pub const BUMP_FIELDS: &[&str] = &["txid", "feeRate"];
 pub const ABANDON_FIELDS: &[&str] = &["txid"];
 pub const BIRTHDAY_FIELDS: &[&str] = &["date", "height"];
 pub const PROBE_FIELDS: &[&str] = &["network", "source"];
+pub const OWN_PEERS_FIELDS: &[&str] = &["network", "peers"];
+pub const PEER_LIST_FIELDS: &[&str] = &["network"];
+/// The node module keeps at most this many of the user's own Kyoto peers.
+pub const MAX_OWN_PEERS: usize = 64;
 
 const MAX_RECIPIENTS: usize = 100;
 
@@ -264,6 +268,38 @@ pub fn parse_probe(text: &str, regtest: bool) -> Result<(Option<String>, String)
     Ok((network, source))
 }
 
+/// `{ network, peers: [host[:port]] }`: the user's own Kyoto peers, which replace the curated list;
+/// `[]` goes back to it. The node module checks each address.
+pub fn parse_own_peers(text: &str, regtest: bool) -> Result<(String, String), String> {
+    let v = doc(text, "set_own_peers")?;
+    let o = object(&v, OWN_PEERS_FIELDS, "set_own_peers")?;
+    let network = text_field(o, "network")?.filter(|n| !n.is_empty()).ok_or("network is required")?;
+    if !is_network(&network, regtest) {
+        return Err(format!("unknown network {network}"));
+    }
+    let peers = o.get("peers").and_then(Value::as_array).ok_or("peers must be a list of host[:port]")?;
+    if peers.len() > MAX_OWN_PEERS {
+        return Err(format!("at most {MAX_OWN_PEERS} peers of your own"));
+    }
+    let mut out = vec![];
+    for p in peers {
+        let s = p.as_str().map(str::trim).filter(|s| !s.is_empty() && s.len() <= 300).ok_or("each peer is a host[:port] string")?;
+        out.push(s.to_string());
+    }
+    Ok((network, json!(out).to_string()))
+}
+
+/// `{ network? }` for the peer list read; the wallet's network when absent.
+pub fn parse_peer_list(text: &str, regtest: bool) -> Result<Option<String>, String> {
+    let v = if text.trim().is_empty() { json!({}) } else { doc(text, "peer_list")? };
+    let o = object(&v, PEER_LIST_FIELDS, "peer_list")?;
+    let network = text_field(o, "network")?.filter(|n| !n.is_empty());
+    if network.as_deref().is_some_and(|n| !is_network(n, regtest)) {
+        return Err(format!("unknown network {}", network.unwrap_or_default()));
+    }
+    Ok(network)
+}
+
 pub fn is_txid(t: &str) -> bool {
     t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -364,6 +400,22 @@ mod tests {
         for bad in [r#"{}"#, r#"{"date":"2024-04-20","height":1}"#, r#"{"date":"soon"}"#, r#"{"height":-1}"#, r#"{"height":"840000"}"#, r#"{"day":"2024-04-20"}"#] {
             assert!(parse_birthday(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn own_peers_name_a_network_and_at_most_64_peers() {
+        let (n, peers) = parse_own_peers(r#"{"network":"signet","peers":[" 10.0.0.2:38333 ","node.lan"]}"#, false).unwrap();
+        assert_eq!((n.as_str(), peers.as_str()), ("signet", r#"["10.0.0.2:38333","node.lan"]"#));
+        assert_eq!(parse_own_peers(r#"{"network":"signet","peers":[]}"#, false).unwrap().1, "[]", "back to the curated list");
+        let many = |k: usize| format!(r#"{{"network":"signet","peers":[{}]}}"#, (0..k).map(|i| format!(r#""10.0.0.{i}:38333""#)).collect::<Vec<_>>().join(","));
+        assert!(parse_own_peers(&many(64), false).is_ok());
+        assert!(parse_own_peers(&many(65), false).unwrap_err().contains("at most 64"));
+        for bad in [r#"{"peers":[]}"#, r#"{"network":"regtest","peers":[]}"#, r#"{"network":"signet","peers":"x"}"#, r#"{"network":"signet","peers":[1]}"#, r#"{"network":"signet","peers":[""]}"#, r#"{"network":"signet","peers":[],"x":1}"#] {
+            assert!(parse_own_peers(bad, false).is_err(), "{bad}");
+        }
+        assert_eq!(parse_peer_list("", false).unwrap(), None);
+        assert_eq!(parse_peer_list(r#"{"network":"regtest"}"#, true).unwrap().as_deref(), Some("regtest"));
+        assert!(parse_peer_list(r#"{"network":"testnet"}"#, true).is_err());
     }
 
     #[test]

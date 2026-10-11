@@ -14,7 +14,7 @@ One role, the custodian set, defaults to `bitcoin_wallet_ui`. There is no approv
 
 | Who | Methods |
 |---|---|
-| custodian | `configure`, `set_active_network`, `open_wallet`, `close_wallet`, `descriptors`, `set_birthday`, `set_sources`, `set_source`, `set_proxy`, `clear_suspect`, `rebroadcast`, `abandon_send` |
+| custodian | `configure`, `set_active_network`, `open_wallet`, `close_wallet`, `descriptors`, `set_birthday`, `set_sources`, `set_source`, `set_proxy`, `set_own_peers`, `peer_list`, `clear_suspect`, `rebroadcast`, `abandon_send` |
 | any named module | `request_send`, `request_fee_bump`, and `cancel_send` for its own request |
 | anyone | every read: `caller_identity`, `list_networks`, `list_wallets`, `job_status`, `wallet_status`, `balances`, `history`, `receive_address`, `fee_rates`, `address_valid`, `format_btc`, `parse_btc`, `sources`, `source_health`, `probe`, `exposure`, `send_status`, `list_sends` |
 
@@ -92,6 +92,14 @@ wallet open, in the core.
   inputs. It is refused once the transaction is going out, and `close_wallet` withdraws open
   sends first.
 
+## Switching networks
+
+`set_active_network` refuses while a wallet is open (`code: "wallet_open"`), a send is open
+(`send_open`) or a wallet is opening (`busy`). While a close settles it queues the switch:
+`{ ok, active, pending }`, also shown by `list_networks`. The switch applies once the close has
+settled, and until then `open_wallet` answers `code: "busy"`, so an open never uses the old
+network.
+
 ## Sources
 
 `sources`, `source_health` and `probe({ network?, source })` pass the node module's rows through:
@@ -99,7 +107,12 @@ wallet open, in the core.
 and `userAdded`. `set_source` and `set_sources` take `certSha256` to pin a TLS server's certificate,
 and null or `""` clears it; like every source change they need the custodian and a closed wallet.
 On regtest the wallet core takes its sources from its own `regtest.json`, so pins there are seen
-by the node module's probes only.
+by the node module's probes only. `set_own_peers({ network, peers })` sets Kyoto's own peers, at
+most 64 (`[]` returns to the curated list), and `peer_list({ network? })` reads them with the
+list; both are custodian only, and the change is refused while a wallet is open.
+
+When the wallet core or the node module stops answering, the reactor asks again after 100 ms,
+doubling to 5 s, and stops once unload begins.
 
 ## Everything else
 

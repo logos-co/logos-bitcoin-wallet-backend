@@ -106,6 +106,15 @@ impl Jobs {
         })
     }
 
+    /// Whether a close, or an open, is still running.
+    pub fn close_pending(&self) -> bool {
+        self.map.values().any(|j| !j.finished() && matches!(j.purpose, Purpose::Close { .. }))
+    }
+
+    pub fn open_pending(&self) -> bool {
+        self.map.values().any(|j| !j.finished() && matches!(j.purpose, Purpose::Open { .. }))
+    }
+
     /// The core answered: the job is queued or running still.
     pub fn answered(&mut self, id: &str, state: &str) {
         if let Some(j) = self.map.get_mut(id) {
@@ -177,6 +186,7 @@ mod tests {
         assert!(!s.contains("secret-receipt") && !s.contains("\"j7\""), "{s}");
         assert_eq!(j.pending().len(), 1);
         assert_eq!(j.lifecycle_pending().as_deref(), Some("signet"));
+        assert!(j.open_pending() && !j.close_pending());
         j.finish(&id, "done", json!({"group": "g_1"}), String::new(), None);
         assert_eq!(j.status_json(&id)["result"]["group"], "g_1");
         assert!(j.lifecycle_pending().is_none());
