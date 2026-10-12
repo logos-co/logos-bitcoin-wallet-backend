@@ -3,17 +3,17 @@ module bitcoin_wallet_core_module {
   depends []
 
   method version() -> tstr description "`{ ok, version, crates }`."
-  method start_job(kind: tstr, params: tstr) -> tstr description "`{ ok, jobId, receipt }` for open_wallet, close_wallet, build_send, bump_fee, rebroadcast, and\nfor the backend sign_and_broadcast, cancel_send, abandon_send and set_birthday (README, Job kinds)."
+  method start_job(kind: tstr, params: tstr) -> tstr description "`{ ok, jobId, receipt }` for open_wallet, close_wallet, build_send, bump_fee, rebroadcast, and\nfor the backend sign_and_broadcast, cancel_send, abandon_send, set_birthday and set_gap_limit (README, Job kinds).\nopen_wallet takes gapLimit?, 20 to 1000: 20, or the stored value on a reopen. set_gap_limit { gapLimit }\n-> { gapLimit, rescanFrom }; a raise rescans from the birthday; refusal codes invalid, busy."
   method job_status(job_id: tstr, receipt: tstr) -> tstr description "`{ ok, jobId, kind, state: queued|running|done|failed|cancelled, error }`."
   method job_result(job_id: tstr, receipt: tstr) -> tstr description "`{ ok, result }` once done."
   method ack_job(job_id: tstr, receipt: tstr) -> bool
   method cancel_job(job_id: tstr, receipt: tstr) -> bool
-  method status() -> tstr description "`{ ok, state, network, group, family, authority: { kind, height, tipAgeSecs, peers }, synced,\nbusy, needsBirthday, openHandle?, approvalHandle?, ... }`. Never waits on the wallet."
-  method balance() -> tstr description "`{ ok, confirmed, waiting, pending, sent, immature, tooSmall: { count, sat } }`, satoshis as\ndecimal strings; empty strings while busy, never zero."
+  method status() -> tstr description "`{ ok, state, network, group, family, gapLimit, authority: { kind, height, tipAgeSecs, peers }, synced,\nbusy, needsBirthday, openHandle?, approvalHandle?, ... }`. Never waits on the wallet."
+  method balance() -> tstr description "`{ ok, confirmed, waiting, pending, sent, immature, tooSmall: { count, sat }, beyondGap: { count, sat } }`,\nsatoshis as decimal strings; empty strings while busy, never zero. beyondGap: coins on addresses past the\nlast gap-reachable used index plus gapLimit, per keychain; left out of confirmed, waiting and pending, and\nstill spendable."
   method next_address() -> tstr description "`{ ok, address, index }`: a fresh receive address."
   method addresses() -> tstr description "`{ ok, addresses: [{ index, address, used }] }`, the revealed receive addresses."
   method utxos() -> tstr description "`{ ok, utxos: [...] }`, outputs confirmed on the authority's chain."
-  method history(page: int) -> tstr description "`{ ok, rows: [{ txid, intent: send|self|combine|fee_bump|receive, amountSat, feeSat,\ncounterparties, height, confirmations, time, state, reportedBy }] }`, newest first."
+  method history(page: int) -> tstr description "`{ ok, rows: [{ txid, intent: send|self|combine|fee_bump|receive, amountSat, feeSat,\ncounterparties, height, confirmations, time, state, reportedBy, beyondGap? }] }`, newest first; beyondGap is\ntrue when the wallet's part is only through addresses past the gap limit."
   method fee_rates() -> tstr description "`{ ok, fast, normal, slow, minimum, sources }` in sat/vB."
   method address_valid(text: tstr, network: tstr) -> tstr description "An address or BIP21 URI on a network: `{ ok, valid, address, type, amountSat? }`."
   method sources_status() -> tstr description "`{ ok, proxy, crossCheck, sources: [{ id, roles, state, suspect, lastSync, error, ... }] }`."

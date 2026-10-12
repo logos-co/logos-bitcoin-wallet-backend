@@ -67,6 +67,8 @@ jobs:
                    a_restart_keeps_an_unknown_broadcast_unknown \
                    an_unknown_or_reconciled_send_is_sent_once_it_confirms \
                    a_birthday_is_a_day_or_a_height \
+                   a_gap_limit_is_20_to_1000 \
+                   coins_beyond_the_gap_pass_through_with_their_twin \
                    absent_heights_are_no_percentage \
                    an_offer_nobody_acknowledges_is_withdrawn_after_the_window \
                    parse_refuses_precision_loss_and_odd_spellings \

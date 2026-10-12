@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 /// What a job is for, which decides what its outcome moves.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Purpose {
-    Open { network: String, label: Option<String> },
+    Open { network: String, label: Option<String>, gap_limit: Option<u64> },
     Close { network: String },
     Build { request: String },
     Sign { request: String },
@@ -17,12 +17,16 @@ pub enum Purpose {
     Rebroadcast { request: Option<String>, txid: String },
     Abandon { request: String, txid: String },
     Birthday { network: String, group: String },
+    GapLimit { network: String, group: String },
 }
 
 impl Purpose {
     /// Opens, closes and rebroadcasts are polled by callers; send jobs show through send_status.
     pub fn public(&self) -> bool {
-        matches!(self, Purpose::Open { .. } | Purpose::Close { .. } | Purpose::Rebroadcast { .. } | Purpose::Abandon { .. } | Purpose::Birthday { .. })
+        matches!(
+            self,
+            Purpose::Open { .. } | Purpose::Close { .. } | Purpose::Rebroadcast { .. } | Purpose::Abandon { .. } | Purpose::Birthday { .. } | Purpose::GapLimit { .. }
+        )
     }
 
     pub fn request(&self) -> Option<&str> {
@@ -181,7 +185,7 @@ mod tests {
     #[test]
     fn job_status_hides_core_ids_and_receipts() {
         let mut j = Jobs::default();
-        let id = j.track("open_wallet", "j7", "secret-receipt", Purpose::Open { network: "signet".into(), label: None });
+        let id = j.track("open_wallet", "j7", "secret-receipt", Purpose::Open { network: "signet".into(), label: None, gap_limit: None });
         let s = j.status_json(&id).to_string();
         assert!(!s.contains("secret-receipt") && !s.contains("\"j7\""), "{s}");
         assert_eq!(j.pending().len(), 1);

@@ -129,14 +129,15 @@ impl Roles {
     }
 }
 
-/// Custodian only: the roles, the network, opening and closing, the public descriptors,
-/// the device-wide source settings, and rebroadcasting.
+/// Custodian only: the roles, the network, opening and closing, the public descriptors, the
+/// wallet's birthday and gap limit, the device-wide source settings, and rebroadcasting.
 pub const CUSTODIAN_METHODS: &[&str] = &[
     "configure",
     "set_active_network",
     "open_wallet",
     "close_wallet",
     "descriptors",
+    "set_gap_limit",
     "set_sources",
     "set_source",
     "set_proxy",

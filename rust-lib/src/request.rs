@@ -11,12 +11,16 @@ pub const NETWORKS: &[&str] = &["mainnet", "testnet4", "signet"];
 pub const REGTEST: &str = "regtest";
 
 pub const FAMILIES: &[&str] = &["bitcoin", "bitcoin_taproot"];
-pub const OPEN_FIELDS: &[&str] = &["network", "group", "family", "birthday", "label"];
+pub const OPEN_FIELDS: &[&str] = &["network", "group", "family", "birthday", "label", "gapLimit"];
 pub const SEND_FIELDS: &[&str] = &["recipients", "feeRate", "target", "sendMax", "smallChangeToFee"];
 pub const RECIPIENT_FIELDS: &[&str] = &["address", "amountSat", "amountBtc"];
 pub const BUMP_FIELDS: &[&str] = &["txid", "feeRate"];
 pub const ABANDON_FIELDS: &[&str] = &["txid"];
 pub const BIRTHDAY_FIELDS: &[&str] = &["date", "height"];
+pub const GAP_FIELDS: &[&str] = &["gapLimit"];
+/// Unused addresses the wallet core watches past the last used one, per keychain.
+pub const MIN_GAP_LIMIT: u64 = 20;
+pub const MAX_GAP_LIMIT: u64 = 1000;
 pub const PROBE_FIELDS: &[&str] = &["network", "source"];
 pub const OWN_PEERS_FIELDS: &[&str] = &["network", "peers"];
 pub const PEER_LIST_FIELDS: &[&str] = &["network"];
@@ -61,6 +65,14 @@ pub fn valid_group(g: &str) -> bool {
     g.starts_with("g_") && g.len() <= 80 && g.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+fn gap_limit(v: Option<&Value>) -> Result<Option<u64>, String> {
+    match v {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) if n.as_u64().is_some_and(|g| (MIN_GAP_LIMIT..=MAX_GAP_LIMIT).contains(&g)) => Ok(n.as_u64()),
+        Some(_) => Err(format!("gapLimit must be a whole number from {MIN_GAP_LIMIT} to {MAX_GAP_LIMIT}")),
+    }
+}
+
 fn valid_day(d: &str) -> bool {
     let b = d.as_bytes();
     b.len() == 10 && b[4] == b'-' && b[7] == b'-' && b.iter().enumerate().all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
@@ -73,6 +85,7 @@ pub struct OpenParams {
     pub family: Option<String>,
     pub birthday: Value,
     pub label: Option<String>,
+    pub gap_limit: Option<u64>,
 }
 
 impl OpenParams {
@@ -88,12 +101,15 @@ impl OpenParams {
         if !self.birthday.is_null() {
             p["birthday"] = self.birthday.clone();
         }
+        if let Some(g) = self.gap_limit {
+            p["gapLimit"] = json!(g);
+        }
         p
     }
 }
 
-/// `{ network?, group?, family?, birthday?, label? }`. The network defaults to the active one
-/// and must be it: switching networks is a separate, deliberate step.
+/// `{ network?, group?, family?, birthday?, label?, gapLimit? }`. The network defaults to the active
+/// one and must be it: switching networks is a separate, deliberate step.
 pub fn parse_open(text: &str, active: &str, regtest: bool) -> Result<OpenParams, String> {
     let v = doc(text, "open_wallet")?;
     let o = object(&v, OPEN_FIELDS, "open_wallet")?;
@@ -125,7 +141,8 @@ pub fn parse_open(text: &str, active: &str, regtest: bool) -> Result<OpenParams,
     if label.as_ref().is_some_and(|l| l.chars().count() > 64 || l.chars().any(char::is_control)) {
         return Err("label must be at most 64 printable characters".into());
     }
-    Ok(OpenParams { network, group, family, birthday, label })
+    let gap_limit = gap_limit(o.get("gapLimit"))?;
+    Ok(OpenParams { network, group, family, birthday, label, gap_limit })
 }
 
 /// A recipient whose address the core must check, and whether it needs the URI's amount.
@@ -253,6 +270,14 @@ pub fn parse_birthday(text: &str) -> Result<Value, String> {
     }
 }
 
+/// `{ gapLimit }`, the core's `set_gap_limit` parameters.
+pub fn parse_gap_limit(text: &str) -> Result<Value, String> {
+    let v = doc(text, "set_gap_limit")?;
+    let o = object(&v, GAP_FIELDS, "set_gap_limit")?;
+    let g = gap_limit(o.get("gapLimit"))?.ok_or("gapLimit is required")?;
+    Ok(json!({"gapLimit": g}))
+}
+
 /// `{ network?, source }`: one source, or every enabled server when `source` is empty.
 pub fn parse_probe(text: &str, regtest: bool) -> Result<(Option<String>, String), String> {
     let v = doc(text, "probe")?;
@@ -338,6 +363,22 @@ mod tests {
             assert!(e.contains(why), "{bad}: {e}");
         }
         assert!(parse_open(r#"{"network":"regtest","family":"bitcoin"}"#, "regtest", true).is_ok());
+    }
+
+    #[test]
+    fn a_gap_limit_is_20_to_1000() {
+        let p = parse_open(r#"{"group":"g_ab12","gapLimit":100}"#, "signet", false).unwrap();
+        assert_eq!(p.core_params(), json!({"network": "signet", "group": "g_ab12", "gapLimit": 100}));
+        assert!(parse_open(r#"{"group":"g_ab12"}"#, "signet", false).unwrap().core_params().get("gapLimit").is_none(), "the core's default or stored value");
+        for g in ["20", "1000"] {
+            assert_eq!(parse_gap_limit(&format!(r#"{{"gapLimit":{g}}}"#)).unwrap()["gapLimit"].to_string(), g);
+        }
+        for bad in ["19", "1001", "0", "-20", "50.5", r#""50""#, "true", "null"] {
+            assert!(parse_open(&format!(r#"{{"family":"bitcoin","gapLimit":{bad}}}"#), "signet", false).is_err() || bad == "null", "{bad}");
+            assert!(parse_gap_limit(&format!(r#"{{"gapLimit":{bad}}}"#)).is_err(), "{bad}");
+        }
+        assert!(parse_gap_limit("{}").unwrap_err().contains("required"));
+        assert!(parse_gap_limit(r#"{"gapLimit":50,"rescan":true}"#).is_err(), "unknown fields");
     }
 
     #[test]

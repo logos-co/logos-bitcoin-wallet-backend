@@ -17,6 +17,9 @@ pub struct WalletEntry {
     /// `{ height, source }` as the wallet core resolved it, or null before the first open.
     #[serde(default)]
     pub birthday: Value,
+    /// The wallet core's gap limit for it, once known.
+    #[serde(default)]
+    pub gap_limit: Option<u64>,
     #[serde(default)]
     pub first_opened: u64,
     #[serde(default)]
@@ -75,6 +78,7 @@ impl Registry {
                 network: network.into(),
                 label: label.unwrap_or_default().into(),
                 birthday,
+                gap_limit: None,
                 first_opened: now,
                 last_opened: now,
             }),
@@ -89,6 +93,15 @@ impl Registry {
             None => return Ok(()),
         }
         self.persist()
+    }
+
+    /// The gap limit the core holds for a known wallet; written only when it changed.
+    pub fn set_gap_limit(&mut self, network: &str, group: &str, gap_limit: u64) -> Result<bool, String> {
+        match self.entries.iter_mut().find(|e| e.network == network && e.group == group) {
+            Some(e) if e.gap_limit != Some(gap_limit) => e.gap_limit = Some(gap_limit),
+            _ => return Ok(false),
+        }
+        self.persist().map(|_| true)
     }
 
     /// Adds a wallet the core has on disk but this registry never saw; true if added.
@@ -144,6 +157,23 @@ mod tests {
         let e = r.get("signet", "g_1").unwrap();
         assert_eq!((e.birthday["source"].as_str(), e.last_opened, e.label.as_str()), (Some("set"), 9, "Savings"));
         assert!(r.discover("signet", "g_2", "bitcoin_taproot").unwrap());
+    }
+
+    #[test]
+    fn the_gap_limit_is_kept_per_wallet() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("wallets.json");
+        let mut r = Registry::new(Some(p.clone()));
+        r.record_open("signet", "g_1", "bitcoin", None, Value::Null, 1).unwrap();
+        assert_eq!(r.list_json()[0]["gapLimit"], Value::Null, "unknown until the core says");
+        assert!(r.set_gap_limit("signet", "g_1", 20).unwrap());
+        assert!(!r.set_gap_limit("signet", "g_1", 20).unwrap(), "unchanged, nothing written");
+        assert!(r.set_gap_limit("signet", "g_1", 200).unwrap());
+        assert!(!r.set_gap_limit("signet", "g_9", 50).unwrap(), "an unknown wallet stays unknown");
+        r.record_open("signet", "g_1", "bitcoin", None, Value::Null, 2).unwrap();
+        let r = Registry::new(Some(p));
+        assert_eq!(r.get("signet", "g_1").unwrap().gap_limit, Some(200), "a reopen keeps it");
+        assert_eq!(r.list_json()[0]["gapLimit"], 200);
     }
 
     #[test]

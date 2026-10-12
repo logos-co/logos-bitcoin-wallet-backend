@@ -14,7 +14,7 @@ One role, the custodian set, defaults to `bitcoin_wallet_ui`. There is no approv
 
 | Who | Methods |
 |---|---|
-| custodian | `configure`, `set_active_network`, `open_wallet`, `close_wallet`, `descriptors`, `set_birthday`, `set_sources`, `set_source`, `set_proxy`, `set_own_peers`, `peer_list`, `clear_suspect`, `rebroadcast`, `abandon_send` |
+| custodian | `configure`, `set_active_network`, `open_wallet`, `close_wallet`, `descriptors`, `set_birthday`, `set_gap_limit`, `set_sources`, `set_source`, `set_proxy`, `set_own_peers`, `peer_list`, `clear_suspect`, `rebroadcast`, `abandon_send` |
 | any named module | `request_send`, `request_fee_bump`, and `cancel_send` for its own request |
 | anyone | every read: `caller_identity`, `list_networks`, `list_wallets`, `job_status`, `wallet_status`, `balances`, `history`, `receive_address`, `fee_rates`, `address_valid`, `format_btc`, `parse_btc`, `sources`, `source_health`, `probe`, `exposure`, `send_status`, `list_sends` |
 
@@ -32,12 +32,12 @@ A refused call answers exactly `{"ok":false,"error":"not authorized"}`.
 
 ## Opening a wallet
 
-`open_wallet({ network?, group?, family?, birthday?, label? })` runs on the active network.
+`open_wallet({ network?, group?, family?, birthday?, label?, gapLimit? })` runs on the active network.
 A `group` reopens a wallet; a `family` (`bitcoin` for native segwit, `bitcoin_taproot`) lets
 the person pick, create or restore one. It answers `{ ok, jobId }`. While the person decides,
 `wallet_status` carries the core's `openHandle`, which the app passes to the
 `keystore.accounts.open` intent. Once open, the wallet is recorded in `wallets.json` with its
-group, family, network, label and birthday, and nothing secret.
+group, family, network, label, birthday and gap limit, and nothing secret.
 
 `set_birthday({ date: "YYYY-MM-DD" } | { height })` gives the open wallet a birthday later, for a
 restore that had none: `{ ok, jobId }`, and the job's result is `{ birthday: { height, source },
@@ -45,6 +45,18 @@ rescanFrom }`. The core refuses a birthday after the wallet's first transaction,
 come, and its code stays on the job. The registry keeps the new birthday. While the rescan runs,
 `wallet_status.rescanFrom` holds the height; `syncPercent` then counts Kyoto's share done from
 there, and is absent under a history server's full scan, which reports no height.
+
+The gap limit is how many unused addresses the core watches past the last used one, per
+keychain: 20 to 1000. `open_wallet`'s `gapLimit` sets it; left out, the core keeps the wallet's
+stored one, or 20. `set_gap_limit({ gapLimit })` changes it for the open wallet, as a wallet
+setting rather than a source one, so an open wallet doesn't stop it: `{ ok, jobId }`, and the
+job's result is `{ gapLimit, rescanFrom }`; a raise scans again from the birthday. A value out of
+range is refused here with `code: "invalid"`, a closed wallet with `no_wallet`, and the core's
+own codes (`invalid`, `busy`) pass through. `wallet_status.gapLimit` is the core's, and
+`wallets.json` follows it. Coins found past the limit stay spendable but are listed apart:
+`balances.beyondGap { count, sat }` with `beyondGapBtc`, left out of `confirmed`, `waiting` and
+`pending`, and `beyondGap: true` on a history row whose wallet part is only through such
+addresses.
 
 From the moment an open starts until the wallet closes, the backend tells the node module
 (`set_wallet_open`), which then refuses source changes on that network. It checks the node
@@ -129,7 +141,7 @@ from the wallet's birthday and absent while a height is unknown. Everything else
 passes as it is: `lastReorg`, `rescanFrom`, `birthdaySource`, `node`, `kyoto` and the authority's
 `kind` and `base` in `wallet_status`; `blockHash`, `sendState`, `confirmedVia` and the `unchecked`
 state on history rows; `authority_suspect` and `unchecked_anchor` alerts. `balances` gives
-`unchecked` its `uncheckedBtc` twin like every other amount. A busy core answers empty
+`unchecked` its `uncheckedBtc` twin like every other amount, and `beyondGap` its `beyondGapBtc`. A busy core answers empty
 amounts, never zero. `format_btc` and `parse_btc` are exact; more than eight decimals is
 refused. Long operations answer a backend job id (`job_status`); the core's receipts never
 leave this module. Events: `wallet_state_changed`, `sync_progress`, `balance_changed`,
@@ -144,7 +156,8 @@ Networks: `mainnet`, `testnet4`, `signet`, and `regtest` when the persistence di
 The wallet core and the node module have no published repository yet, so their contracts are
 committed under `contracts/` and named by `dependency_overrides` in `metadata.json`.
 Regenerate them from each module's `glue.rs` with `logos-lidl-gen --from-rust` when either
-changes.
+changes. The core's contract is extended by hand to its gap-limit interface (`gapLimit`,
+`set_gap_limit`, `beyondGap`) until the core lands it; regenerate it then.
 
 ```bash
 cd rust-lib && cargo test --no-default-features

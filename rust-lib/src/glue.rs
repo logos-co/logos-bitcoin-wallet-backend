@@ -34,11 +34,12 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     /// CUSTODIAN. While a close settles the switch is queued: `{ ok, active, pending }`, and opens are
     /// refused with code busy until it applies. Refusals carry `code`: busy, wallet_open, send_open.
     fn set_active_network(&self, network: String) -> String;
-    /// `{ ok, active, wallets: [{ group, family, network, label, birthday, firstOpened, lastOpened }] }`:
+    /// `{ ok, active, wallets: [{ group, family, network, label, birthday, gapLimit, firstOpened, lastOpened }] }`:
     /// wallets opened before, newest first. No secrets.
     fn list_wallets(&self) -> String;
-    /// CUSTODIAN. `{ network?, group?, family?, birthday?, label? }` on the active network. `{ ok,
-    /// jobId }`; wallet_status carries `openHandle` while the person decides in the keys app.
+    /// CUSTODIAN. `{ network?, group?, family?, birthday?, label?, gapLimit? }` on the active network; gapLimit
+    /// 20 to 1000, else the core's 20 or the wallet's stored one. `{ ok, jobId }`; wallet_status carries
+    /// `openHandle` while the person decides in the keys app.
     fn open_wallet(&self, params_json: String) -> String;
     /// CUSTODIAN. Withdraws open sends first; refused while one is going out. `{ ok, jobId }`.
     fn close_wallet(&self) -> String;
@@ -49,13 +50,17 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     /// CUSTODIAN. `{ date: "YYYY-MM-DD" }` or `{ height }` for the open wallet; the core scans again from
     /// it. `{ ok, jobId }`; the job's result is `{ birthday: { height, source }, rescanFrom }`.
     fn set_birthday(&self, params_json: String) -> String;
+    /// CUSTODIAN. `{ gapLimit }`, 20 to 1000, for the open wallet; a raise scans again from the birthday.
+    /// `{ ok, jobId }`; the job's result is `{ gapLimit, rescanFrom }`. Refusal codes: invalid, busy, no_wallet.
+    fn set_gap_limit(&self, params_json: String) -> String;
 
-    /// The core's status plus `syncPercent`, `activeNetwork`, `label` and `openSend`.
+    /// The core's status, `gapLimit` included, plus `syncPercent`, `activeNetwork`, `label` and `openSend`.
     fn wallet_status(&self) -> String;
-    /// `{ ok, busy, confirmed, waiting, pending, sent, immature, tooSmall }` in satoshis, each with
-    /// a `…Btc` twin. Empty while busy, never zero.
+    /// `{ ok, busy, confirmed, waiting, pending, sent, immature, tooSmall, beyondGap: { count, sat } }` in
+    /// satoshis, each with a `…Btc` twin. beyondGap is coins past the gap limit: outside confirmed, waiting
+    /// and pending, still spendable. Empty while busy, never zero.
     fn balances(&self) -> String;
-    /// The core's history page, newest first; rows gain `amountBtc` and `feeBtc`.
+    /// The core's history page, newest first; rows gain `amountBtc` and `feeBtc`, and keep `beyondGap`.
     fn history(&self, page: i64) -> String;
     /// `{ ok, address, index }`: a fresh receive address.
     fn receive_address(&self) -> String;
@@ -309,11 +314,17 @@ fn lock(inner: &Shared) -> std::sync::MutexGuard<'_, Inner> {
 
 /// Starts a core job and tracks it under a backend id.
 fn start_core_job(inner: &Shared, kind: &str, params: &Value, purpose: Purpose) -> Result<String, String> {
+    start_coded(inner, kind, params, purpose).map_err(|(_, e)| e)
+}
+
+/// As start_core_job, keeping the core's refusal code.
+fn start_coded(inner: &Shared, kind: &str, params: &Value, purpose: Purpose) -> Result<String, (Option<String>, String)> {
     let p = params.to_string();
-    let v = ipc!(core(), start_job_async_with_timeout, WRITE, kind, &p).and_then(|s| parse(s, "wallet core"))?;
-    let v = checked(v, "the wallet core")?;
+    let v = ipc!(core(), start_job_async_with_timeout, WRITE, kind, &p).and_then(|s| parse(s, "wallet core")).map_err(|e| (None, e))?;
+    let code = v["code"].as_str().map(String::from);
+    let v = checked(v, "the wallet core").map_err(|e| (code, e))?;
     let (Some(id), Some(receipt)) = (v["jobId"].as_str(), v["receipt"].as_str()) else {
-        return Err("the wallet core returned no job id".into());
+        return Err((None, "the wallet core returned no job id".into()));
     };
     Ok(lock(inner).jobs.track(kind, id, receipt, purpose))
 }
@@ -440,13 +451,19 @@ fn finish(inner: &Shared, jid: &str, state: &str, result: Value, error: String, 
     let Some(purpose) = purpose else { return };
     let done = state == "done";
     match purpose {
-        Purpose::Open { network, label } => {
+        Purpose::Open { network, label, gap_limit } => {
             if done {
                 let mut g = lock(inner);
                 let net = result["network"].as_str().unwrap_or(network.as_str()).to_string();
                 let (group, family) = (result["group"].as_str().unwrap_or_default(), result["family"].as_str().unwrap_or_default());
                 if let Err(e) = g.registry.record_open(&net, group, family, label.as_deref(), result["birthday"].clone(), now_secs()) {
                     eprintln!("bitcoin_wallet_backend: {e}");
+                }
+                // The core's word, else what was asked; the status sync fills in a default.
+                if let Some(gap) = result["gapLimit"].as_u64().or(gap_limit) {
+                    if let Err(e) = g.registry.set_gap_limit(&net, group, gap) {
+                        eprintln!("bitcoin_wallet_backend: {e}");
+                    }
                 }
             } else {
                 set_wallet_open(inner, &network, false);
@@ -510,6 +527,14 @@ fn finish(inner: &Shared, jid: &str, state: &str, result: Value, error: String, 
         Purpose::Birthday { network, group } => {
             if done {
                 if let Err(e) = lock(inner).registry.set_birthday(&network, &group, result["birthday"].clone()) {
+                    eprintln!("bitcoin_wallet_backend: {e}");
+                }
+            }
+            emit_job_finished(jid, state);
+        }
+        Purpose::GapLimit { network, group } => {
+            if let Some(gap) = result["gapLimit"].as_u64().filter(|_| done) {
+                if let Err(e) = lock(inner).registry.set_gap_limit(&network, &group, gap) {
                     eprintln!("bitcoin_wallet_backend: {e}");
                 }
             }
@@ -709,6 +734,12 @@ fn slow_tick(inner: &Shared, check_node: bool) {
     let Ok(status) = core_status() else { return };
     assert_wallet_open(inner, &status, check_node);
     apply_pending_switch(inner, &status);
+    let open = matches!(status["state"].as_str(), Some("syncing" | "ready"));
+    if let (true, Some(n), Some(g), Some(gap)) = (open, status["network"].as_str(), status["group"].as_str(), status["gapLimit"].as_u64()) {
+        if let Err(e) = lock(inner).registry.set_gap_limit(n, g, gap) {
+            eprintln!("bitcoin_wallet_backend: {e}");
+        }
+    }
     let sync = view::sync_view(&status);
     let digest = json!([sync["state"], sync["network"], sync["walletTip"], sync["authorityHeight"], sync["percent"], sync["synced"]]).to_string();
     let changed = {
@@ -720,7 +751,7 @@ fn slow_tick(inner: &Shared, check_node: bool) {
     if changed {
         emit_sync_progress(&sync.to_string());
     }
-    if matches!(status["state"].as_str(), Some("syncing" | "ready")) {
+    if open {
         if let Ok(b) = ipc!(core(), balance_async_with_timeout, READ).and_then(|s| parse(s, "wallet core")) {
             if let Some(d) = view::balance_digest(&b) {
                 let changed = {
@@ -966,7 +997,7 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
         }
         // Locks the network's source settings for as long as the wallet is open.
         set_wallet_open(&self.inner, &p.network, true);
-        let purpose = Purpose::Open { network: p.network.clone(), label: p.label.clone() };
+        let purpose = Purpose::Open { network: p.network.clone(), label: p.label.clone(), gap_limit: p.gap_limit };
         match start_core_job(&self.inner, "open_wallet", &p.core_params(), purpose) {
             Ok(j) => ok(json!({"jobId": j})),
             Err(e) => {
@@ -1026,6 +1057,31 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
         match start_core_job(&self.inner, "set_birthday", &params, purpose) {
             Ok(j) => ok(json!({"jobId": j})),
             Err(e) => err(e),
+        }
+    }
+
+    fn set_gap_limit(&self, params_json: String) -> String {
+        if !self.custodian("set_gap_limit", &caller()) {
+            return refused();
+        }
+        let params = match request::parse_gap_limit(&params_json) {
+            Ok(p) => p,
+            Err(e) => return coded("invalid", e),
+        };
+        // A wallet setting, not a source one: allowed while the wallet is open, and only then.
+        let st = match core_status() {
+            Ok(s) if matches!(s["state"].as_str(), Some("syncing" | "ready")) => s,
+            Ok(_) => return coded("no_wallet", "no wallet is open"),
+            Err(e) => return err(format!("the wallet core did not answer: {e}")),
+        };
+        let purpose = Purpose::GapLimit {
+            network: st["network"].as_str().unwrap_or_default().into(),
+            group: st["group"].as_str().unwrap_or_default().into(),
+        };
+        match start_coded(&self.inner, "set_gap_limit", &params, purpose) {
+            Ok(j) => ok(json!({"jobId": j})),
+            Err((Some(code), e)) => coded(&code, e),
+            Err((None, e)) => err(e),
         }
     }
 
