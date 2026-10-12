@@ -3,23 +3,23 @@ module bitcoin_wallet_core_module {
   depends []
 
   method version() -> tstr description "`{ ok, version, crates }`."
-  method start_job(kind: tstr, params: tstr) -> tstr description "`{ ok, jobId, receipt }` for open_wallet, close_wallet, build_send, bump_fee, rebroadcast, and\nfor the backend sign_and_broadcast, cancel_send, abandon_send, set_birthday and set_gap_limit (README, Job kinds).\nopen_wallet takes gapLimit?, 20 to 1000: 20, or the stored value on a reopen; its result carries the gapLimit\nin effect. set_gap_limit { gapLimit } -> { gapLimit, rescanFrom }; a raise rescans from the birthday; refusal\ncodes invalid, busy. A preview spending coins past the gap limit warns { kind: beyond_gap_inputs, count, sat,\nmessage }."
+  method start_job(kind: tstr, params: tstr) -> tstr description "`{ ok, jobId, receipt }` for open_wallet, close_wallet, build_send, bump_fee, rebroadcast, and\nfor the backend sign_and_broadcast, cancel_send, abandon_send and set_birthday (README, Job kinds)."
   method job_status(job_id: tstr, receipt: tstr) -> tstr description "`{ ok, jobId, kind, state: queued|running|done|failed|cancelled, error }`."
   method job_result(job_id: tstr, receipt: tstr) -> tstr description "`{ ok, result }` once done."
   method ack_job(job_id: tstr, receipt: tstr) -> bool
   method cancel_job(job_id: tstr, receipt: tstr) -> bool
-  method status() -> tstr description "`{ ok, state, network, group, family, gapLimit, authority: { kind, height, tipAgeSecs, peers }, synced,\nbusy, needsBirthday, openHandle?, approvalHandle?, ... }`. Never waits on the wallet."
-  method balance() -> tstr description "`{ ok, confirmed, waiting, pending, sent, immature, tooSmall: { count, sat }, beyondGap: { count, sat,\nconfirmedSat } }`, satoshis as decimal strings; empty strings while busy, never zero. beyondGap: unspent\ncoins on addresses past the last gap-reachable used index plus gapLimit, per keychain, confirmed, waiting\nand pending (sat) and the confirmed part (confirmedSat); left out of confirmed, waiting and pending, and\nstill spendable."
+  method status() -> tstr description "`{ ok, state, network, group, family, authority: { kind, height, tipAgeSecs, peers }, synced,\nbusy, needsBirthday, openHandle?, approvalHandle?, ... }`. Never waits on the wallet."
+  method balance() -> tstr description "`{ ok, confirmed, waiting, pending, sent, immature, tooSmall: { count, sat } }`, satoshis as\ndecimal strings; empty strings while busy, never zero."
   method next_address() -> tstr description "`{ ok, address, index }`: a fresh receive address."
   method addresses() -> tstr description "`{ ok, addresses: [{ index, address, used }] }`, the revealed receive addresses."
   method utxos() -> tstr description "`{ ok, utxos: [...] }`, outputs confirmed on the authority's chain."
-  method history(page: int) -> tstr description "`{ ok, rows: [{ txid, intent: send|self|combine|fee_bump|receive, amountSat, feeSat,\ncounterparties, height, confirmations, time, state, reportedBy, beyondGap? }] }`, newest first; beyondGap is\ntrue when the wallet's part is only through addresses past the gap limit."
+  method history(page: int) -> tstr description "`{ ok, rows: [{ txid, intent: send|self|combine|fee_bump|receive, amountSat, feeSat,\ncounterparties, height, confirmations, time, state, reportedBy }] }`, newest first."
   method fee_rates() -> tstr description "`{ ok, fast, normal, slow, minimum, sources }` in sat/vB."
   method address_valid(text: tstr, network: tstr) -> tstr description "An address or BIP21 URI on a network: `{ ok, valid, address, type, amountSat? }`."
   method sources_status() -> tstr description "`{ ok, proxy, crossCheck, sources: [{ id, roles, state, suspect, lastSync, error, ... }] }`."
   method exposure() -> tstr description "`{ ok, servers: [{ source, url, operator, role, since, last }] }`."
   method descriptors() -> tstr description "The wallet's public descriptors, as the keystore gave them. Backend only."
-  method preview(preview_id: tstr) -> tstr description "A send's preview with its state and `approvalHandle`; its warnings include\n`{ kind: beyond_gap_inputs, count, sat, message }` when it spends coins past the gap limit."
+  method preview(preview_id: tstr) -> tstr description "A send's preview with its state and `approvalHandle`."
   method list_wallets(network: tstr) -> tstr description "`{ ok, wallets: [{ group, family, network, createdAt }] }`."
   method clear_suspect(source: tstr) -> tstr description "Clears a source the core marked suspect. Backend only."
   method reload_routes() -> tstr description "Reads `route_table` again. Backend only."

@@ -201,8 +201,12 @@ mod tests {
         let mut more = b.clone();
         more["beyondGap"]["confirmedSat"] = json!("30000");
         assert_ne!(balance_digest(&more), balance_digest(&b), "a confirmation beyond the gap is a balance change");
-        let busy = balance_view(json!({"ok": true, "busy": true, "beyondGap": {"count": null, "sat": "", "confirmedSat": ""}}));
-        assert_eq!(busy["beyondGapConfirmedBtc"], "", "unread stays unread");
+        // The core's busy reply, as it gives it.
+        let busy = balance_view(json!({"ok": true, "busy": true, "confirmed": "", "waiting": "", "pending": "", "sent": "", "immature": "",
+                                       "tooSmall": {"count": null, "sat": ""}, "beyondGap": {"count": null, "sat": "", "confirmedSat": ""}}));
+        assert_eq!((busy["beyondGapBtc"].clone(), busy["beyondGapConfirmedBtc"].clone()), (json!(""), json!("")), "unread stays unread");
+        assert_eq!(busy["beyondGap"], json!({"count": null, "sat": "", "confirmedSat": ""}));
+        assert_eq!(balance_digest(&busy), None);
     }
 
     #[test]

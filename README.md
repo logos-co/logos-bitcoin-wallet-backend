@@ -55,9 +55,9 @@ range is refused here with `code: "invalid"`, a closed wallet with `no_wallet`, 
 own codes (`invalid`, `busy`) pass through. `wallet_status.gapLimit` is the core's, and
 `wallets.json` follows it. Coins found past the limit stay spendable but are listed apart:
 `balances.beyondGap { count, sat, confirmedSat }` with `beyondGapBtc` and `beyondGapConfirmedBtc`
-(all of them, and the confirmed part), left out of `confirmed`, `waiting` and `pending`, and
-`beyondGap: true` on a history row whose wallet part is only through such addresses. A send that
-spends them carries the core's `beyond_gap_inputs` warning in its summary.
+(all of them, and the confirmed part), left out of `confirmed`, `waiting`, `pending` and `sent`,
+and `beyondGap` on every history row, true when the wallet's part is only through such
+addresses. A send that spends them carries the core's `beyond_gap_inputs` warning in its summary.
 
 From the moment an open starts until the wallet closes, the backend tells the node module
 (`set_wallet_open`), which then refuses source changes on that network. It checks the node
@@ -157,8 +157,8 @@ Networks: `mainnet`, `testnet4`, `signet`, and `regtest` when the persistence di
 The wallet core and the node module have no published repository yet, so their contracts are
 committed under `contracts/` and named by `dependency_overrides` in `metadata.json`.
 Regenerate them from each module's `glue.rs` with `logos-lidl-gen --from-rust` when either
-changes. The core's contract is extended by hand to its gap-limit interface (`gapLimit`,
-`set_gap_limit`, `beyondGap`) until the core lands it; regenerate it then.
+changes. The core's is generated from its glue at 2eea866, whose doc comments don't describe
+the gap limit; its README does.
 
 ```bash
 cd rust-lib && cargo test --no-default-features
