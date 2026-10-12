@@ -157,8 +157,7 @@ Networks: `mainnet`, `testnet4`, `signet`, and `regtest` when the persistence di
 The wallet core and the node module have no published repository yet, so their contracts are
 committed under `contracts/` and named by `dependency_overrides` in `metadata.json`.
 Regenerate them from each module's `glue.rs` with `logos-lidl-gen --from-rust` when either
-changes. The core's is generated from its glue at 2eea866, whose doc comments don't describe
-the gap limit; its README does.
+changes. The core's is generated from its glue at 2509a89.
 
 ```bash
 cd rust-lib && cargo test --no-default-features
