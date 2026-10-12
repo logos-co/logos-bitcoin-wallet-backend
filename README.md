@@ -54,9 +54,10 @@ job's result is `{ gapLimit, rescanFrom }`; a raise scans again from the birthda
 range is refused here with `code: "invalid"`, a closed wallet with `no_wallet`, and the core's
 own codes (`invalid`, `busy`) pass through. `wallet_status.gapLimit` is the core's, and
 `wallets.json` follows it. Coins found past the limit stay spendable but are listed apart:
-`balances.beyondGap { count, sat }` with `beyondGapBtc`, left out of `confirmed`, `waiting` and
-`pending`, and `beyondGap: true` on a history row whose wallet part is only through such
-addresses.
+`balances.beyondGap { count, sat, confirmedSat }` with `beyondGapBtc` and `beyondGapConfirmedBtc`
+(all of them, and the confirmed part), left out of `confirmed`, `waiting` and `pending`, and
+`beyondGap: true` on a history row whose wallet part is only through such addresses. A send that
+spends them carries the core's `beyond_gap_inputs` warning in its summary.
 
 From the moment an open starts until the wallet closes, the backend tells the node module
 (`set_wallet_open`), which then refuses source changes on that network. It checks the node

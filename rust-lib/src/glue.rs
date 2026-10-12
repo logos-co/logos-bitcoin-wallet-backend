@@ -56,9 +56,9 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
 
     /// The core's status, `gapLimit` included, plus `syncPercent`, `activeNetwork`, `label` and `openSend`.
     fn wallet_status(&self) -> String;
-    /// `{ ok, busy, confirmed, waiting, pending, sent, immature, tooSmall, beyondGap: { count, sat } }` in
-    /// satoshis, each with a `…Btc` twin. beyondGap is coins past the gap limit: outside confirmed, waiting
-    /// and pending, still spendable. Empty while busy, never zero.
+    /// `{ ok, busy, confirmed, waiting, pending, sent, immature, tooSmall, beyondGap: { count, sat, confirmedSat } }`
+    /// in satoshis, each with a `…Btc` twin. beyondGap is coins past the gap limit, confirmedSat its confirmed
+    /// part: outside confirmed, waiting and pending, still spendable. Empty while busy, never zero.
     fn balances(&self) -> String;
     /// The core's history page, newest first; rows gain `amountBtc` and `feeBtc`, and keep `beyondGap`.
     fn history(&self, page: i64) -> String;

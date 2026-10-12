@@ -75,6 +75,7 @@ pub fn balance_view(mut b: Value) -> Value {
     }
     // Coins past the gap limit: outside confirmed, waiting and pending, and still spendable.
     b["beyondGapBtc"] = json!(btc_of(b["beyondGap"]["sat"].as_str().unwrap_or_default()));
+    b["beyondGapConfirmedBtc"] = json!(btc_of(b["beyondGap"]["confirmedSat"].as_str().unwrap_or_default()));
     b
 }
 
@@ -190,6 +191,18 @@ mod tests {
         assert_eq!(v["gapLimit"], 200);
         let h = history_view(json!({"ok": true, "rows": [{"txid": "a", "amountSat": "5000", "feeSat": null, "beyondGap": true}, {"txid": "b", "amountSat": "1"}]}));
         assert_eq!((h["rows"][0]["beyondGap"].clone(), h["rows"][1].get("beyondGap")), (json!(true), None));
+    }
+
+    #[test]
+    fn the_confirmed_part_beyond_the_gap_gains_its_twin() {
+        let b = balance_view(json!({"ok": true, "busy": false, "confirmed": "100000", "beyondGap": {"count": 3, "sat": "30000", "confirmedSat": "20000"}}));
+        assert_eq!(b["beyondGap"]["confirmedSat"], "20000", "passed through");
+        assert_eq!((b["beyondGapBtc"].clone(), b["beyondGapConfirmedBtc"].clone()), (json!("0.00030000"), json!("0.00020000")));
+        let mut more = b.clone();
+        more["beyondGap"]["confirmedSat"] = json!("30000");
+        assert_ne!(balance_digest(&more), balance_digest(&b), "a confirmation beyond the gap is a balance change");
+        let busy = balance_view(json!({"ok": true, "busy": true, "beyondGap": {"count": null, "sat": "", "confirmedSat": ""}}));
+        assert_eq!(busy["beyondGapConfirmedBtc"], "", "unread stays unread");
     }
 
     #[test]

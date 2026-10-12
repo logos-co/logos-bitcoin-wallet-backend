@@ -1367,6 +1367,14 @@ mod tests {
     }
 
     #[test]
+    fn a_preview_spending_beyond_the_gap_says_so() {
+        let mut p = preview("p1");
+        p["warnings"] = json!([{"kind": "beyond_gap_inputs", "count": 1, "sat": "100000", "message": "spends coins past the gap limit"}]);
+        let w = &summary(&p)["warnings"];
+        assert_eq!((w[0]["kind"].clone(), w[0]["sat"].clone()), (json!("beyond_gap_inputs"), json!("100000")), "as the core gives it");
+    }
+
+    #[test]
     fn listing_is_newest_first_and_bounded() {
         let mut s = Sends::default();
         for i in 0..(KEEP_FINAL + 5) {

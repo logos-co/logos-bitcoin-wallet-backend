@@ -69,6 +69,7 @@ jobs:
                    a_birthday_is_a_day_or_a_height \
                    a_gap_limit_is_20_to_1000 \
                    coins_beyond_the_gap_pass_through_with_their_twin \
+                   the_confirmed_part_beyond_the_gap_gains_its_twin \
                    absent_heights_are_no_percentage \
                    an_offer_nobody_acknowledges_is_withdrawn_after_the_window \
                    parse_refuses_precision_loss_and_odd_spellings \
