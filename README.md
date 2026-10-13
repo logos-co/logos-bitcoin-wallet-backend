@@ -154,8 +154,8 @@ Networks: `mainnet`, `testnet4`, `signet`, and `regtest` when the persistence di
 
 ## Contracts
 
-The wallet core and the node module have no published repository yet, so their contracts are
-committed under `contracts/` and named by `dependency_overrides` in `metadata.json`.
+The wallet core's and the node module's contracts are committed under `contracts/` and named
+by `dependency_overrides` in `metadata.json`, so the module builds without their sources.
 Regenerate them from each module's `glue.rs` with `logos-lidl-gen --from-rust` when either
 changes. The core's is generated from its glue at 2509a89.
 
