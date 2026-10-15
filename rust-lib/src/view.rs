@@ -163,11 +163,11 @@ mod tests {
         assert_ne!(balance_digest(&more), before, "a change in unchecked is a balance change");
         let busy = balance_view(json!({"ok": true, "busy": true, "unchecked": ""}));
         assert_eq!(busy["uncheckedBtc"], "", "unread stays unread");
-        let st = json!({"state": "ready", "authority": {"height": 10, "kind": "kyoto", "base": 0},
+        let st = json!({"state": "ready", "authority": {"height": 10, "kind": "kyoto", "base": 0, "asked": false},
                         "kyoto": {"rescans": 1, "window": {"from": 0, "to": 10}, "lastConflict": {"at": 5, "peers": 2}, "quorum": 2, "onePeerDecides": false},
                         "node": {"rescans": 0, "window": null}, "walletTip": 10});
         let v = status_view(st.clone(), "regtest", None, None);
-        for (k, sub) in [("authority", "base"), ("kyoto", "rescans"), ("kyoto", "window"), ("kyoto", "lastConflict"), ("kyoto", "quorum"), ("kyoto", "onePeerDecides"), ("node", "rescans"), ("node", "window")] {
+        for (k, sub) in [("authority", "base"), ("authority", "asked"), ("kyoto", "rescans"), ("kyoto", "window"), ("kyoto", "lastConflict"), ("kyoto", "quorum"), ("kyoto", "onePeerDecides"), ("node", "rescans"), ("node", "window")] {
             assert_eq!(v[k][sub], st[k][sub], "{k}.{sub} passes unchanged");
         }
         let h = history_view(json!({"ok": true, "rows": [{"txid": "a", "state": "unchecked", "amountSat": "2500", "feeSat": null, "confirmedVia": "b", "height": null}]}));
