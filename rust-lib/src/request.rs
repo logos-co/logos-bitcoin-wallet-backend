@@ -61,8 +61,13 @@ fn text_field(o: &Map<String, Value>, k: &str) -> Result<Option<String>, String>
     }
 }
 
+/// An account id the signer manager lists: a keystore group (`g_…`) or a device account
+/// (`shell-…`, `keycard-…`). The wallet core keeps it as a directory name, under the same rule.
 pub fn valid_group(g: &str) -> bool {
-    g.starts_with("g_") && g.len() <= 80 && g.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    let b = g.as_bytes();
+    let windows = ["con", "prn", "aux", "nul"].iter().any(|r| g.eq_ignore_ascii_case(r))
+        || (b.len() == 4 && (b[..3].eq_ignore_ascii_case(b"com") || b[..3].eq_ignore_ascii_case(b"lpt")) && b[3].is_ascii_digit());
+    !b.is_empty() && b.len() <= 80 && b[0] != b'.' && !windows && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'-')
 }
 
 fn gap_limit(v: Option<&Value>) -> Result<Option<u64>, String> {
@@ -122,7 +127,7 @@ pub fn parse_open(text: &str, active: &str, regtest: bool) -> Result<OpenParams,
     }
     let group = text_field(o, "group")?.filter(|g| !g.is_empty());
     if group.as_deref().is_some_and(|g| !valid_group(g)) {
-        return Err("group must be a keystore group (g_…)".into());
+        return Err("group must be an account id: ASCII letters, digits, _ or -, at most 80".into());
     }
     let family = text_field(o, "family")?.filter(|f| !f.is_empty());
     if family.as_deref().is_some_and(|f| !FAMILIES.contains(&f)) {
@@ -352,7 +357,13 @@ mod tests {
             (r#"{"network":"signet","family":"bitcoin"}"#, "switch to signet first"),
             (r#"{}"#, "name a group"),
             (r#"{"family":"evm"}"#, "family must be"),
-            (r#"{"group":"../x"}"#, "keystore group"),
+            (r#"{"group":"../x"}"#, "account id"),
+            (r#"{"group":".."}"#, "account id"),
+            (r#"{"group":"a/b"}"#, "account id"),
+            (r#"{"group":"a\\b"}"#, "account id"),
+            (r#"{"group":".hidden"}"#, "account id"),
+            (r#"{"group":"nul"}"#, "account id"),
+            (r#"{"group":"g_é"}"#, "account id"),
             (r#"{"family":"bitcoin","password":"x"}"#, "unknown field password"),
             (r#"{"family":"bitcoin","birthday":"soon"}"#, "birthday must be"),
             (r#"{"family":"bitcoin","birthday":-1}"#, "birthday must be"),
@@ -363,6 +374,18 @@ mod tests {
             assert!(e.contains(why), "{bad}: {e}");
         }
         assert!(parse_open(r#"{"network":"regtest","family":"bitcoin"}"#, "regtest", true).is_ok());
+    }
+
+    #[test]
+    fn a_device_account_opens_by_its_id() {
+        for id in ["shell-f0150787-84-0-0", "keycard-73c5da0a-86-1-0", "ledger-73c5da0a-84-0-0", "mock-segwit", "g_ab12"] {
+            let p = parse_open(&format!(r#"{{"group":"{id}","label":"Card"}}"#), "regtest", true).unwrap();
+            assert_eq!(p.core_params(), json!({"network": "regtest", "group": id}), "{id}");
+        }
+        assert!(valid_group(&"a".repeat(80)) && !valid_group(&"a".repeat(81)));
+        for bad in ["", ".", "..", "../g_x", "g_a/b", "CON", "lpt1", "g_ x"] {
+            assert!(!valid_group(bad), "{bad:?}");
+        }
     }
 
     #[test]
