@@ -165,6 +165,7 @@ pub const UNGATED_METHODS: &[&str] = &[
     "balances",
     "history",
     "receive_address",
+    "current_address",
     "fee_rates",
     "address_valid",
     "format_btc",

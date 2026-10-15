@@ -16,7 +16,7 @@ One role, the custodian set, defaults to `bitcoin_wallet_ui`. There is no approv
 |---|---|
 | custodian | `configure`, `set_active_network`, `open_wallet`, `close_wallet`, `descriptors`, `set_birthday`, `set_gap_limit`, `set_sources`, `set_source`, `set_proxy`, `set_own_peers`, `peer_list`, `clear_suspect`, `rebroadcast`, `abandon_send` |
 | any named module | `request_send`, `request_fee_bump`, and `cancel_send` for its own request |
-| anyone | every read: `caller_identity`, `list_networks`, `list_wallets`, `job_status`, `wallet_status`, `balances`, `history`, `receive_address`, `fee_rates`, `address_valid`, `format_btc`, `parse_btc`, `sources`, `source_health`, `probe`, `exposure`, `send_status`, `list_sends` |
+| anyone | every read: `caller_identity`, `list_networks`, `list_wallets`, `job_status`, `wallet_status`, `balances`, `history`, `receive_address`, `current_address`, `fee_rates`, `address_valid`, `format_btc`, `parse_btc`, `sources`, `source_health`, `probe`, `exposure`, `send_status`, `list_sends` |
 
 `configure({ custodians })` replaces the set. It is total (`{}` leaves nobody), refuses
 unknown keys, and is saved to `roles.json` in the instance's persistence directory. Only a
@@ -140,10 +140,15 @@ doubling to 5 s, and stops once unload begins.
 Reads pass through with display amounts (`…Btc`, eight decimals) and `syncPercent`, counted
 from the wallet's birthday and absent while a height is unknown. Everything else the core says
 passes as it is: `lastReorg`, `rescanFrom`, `birthdaySource`, `node`, `kyoto` and the authority's
-`kind` and `base` in `wallet_status`; `blockHash`, `sendState`, `confirmedVia` and the `unchecked`
+`kind`, `base` and `asked` (false until the open's first round of asking the chain's sources ends) in
+`wallet_status`; `blockHash`, `sendState`, `confirmedVia` and the `unchecked`
 state on history rows; `authority_suspect` and `unchecked_anchor` alerts. `balances` gives
 `unchecked` its `uncheckedBtc` twin like every other amount, and `beyondGap` its `beyondGapBtc`. A busy core answers empty
-amounts, never zero. `format_btc` and `parse_btc` are exact; more than eight decimals is
+amounts, never zero. `receive_address` is the core's `next_address`: a fresh address, or, once
+`unused` unused addresses reach the gap limit, the first of them with `fresh` false.
+`current_address` is the first unused one, revealed only when none is: what the app shows when a
+wallet opens. `fee_rates` is an estimate (`estimated`, with the `sources` it came from), or `{ ok:
+false, error: "no fee estimate yet" }`, never the floor in its place. `format_btc` and `parse_btc` are exact; more than eight decimals is
 refused. Long operations answer a backend job id (`job_status`); the core's receipts never
 leave this module. Events: `wallet_state_changed`, `sync_progress`, `balance_changed`,
 `send_status_changed`, `job_finished`, `source_alert`.
@@ -157,7 +162,7 @@ Networks: `mainnet`, `testnet4`, `signet`, and `regtest` when the persistence di
 The wallet core's and the node module's contracts are committed under `contracts/` and named
 by `dependency_overrides` in `metadata.json`, so the module builds without their sources.
 Regenerate them from each module's `glue.rs` with `logos-lidl-gen --from-rust` when either
-changes. The core's is generated from its glue at 2509a89.
+changes. The core's is generated from its glue at 6e11546.
 
 ```bash
 cd rust-lib && cargo test --no-default-features

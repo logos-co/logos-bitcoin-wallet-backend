@@ -8,13 +8,14 @@ module bitcoin_wallet_core_module {
   method job_result(job_id: tstr, receipt: tstr) -> tstr description "`{ ok, result }` once done."
   method ack_job(job_id: tstr, receipt: tstr) -> bool
   method cancel_job(job_id: tstr, receipt: tstr) -> bool
-  method status() -> tstr description "`{ ok, state, network, group, family, authority: { kind, height, tipAgeSecs, peers }, synced,\nbusy, needsBirthday, gapLimit, openHandle?, approvalHandle?, ... }`. Never waits on the wallet."
+  method status() -> tstr description "`{ ok, state, network, group, family, authority: { kind, height, tipAgeSecs, peers, asked }, synced,\nbusy, needsBirthday, gapLimit, openHandle?, approvalHandle?, ... }`; `asked` is false until the\nopen's first round of asking the chain's sources ends. Never waits on the wallet."
   method balance() -> tstr description "`{ ok, confirmed, waiting, pending, sent, immature, tooSmall: { count, sat }, beyondGap: { count,\nsat, confirmedSat } }`, satoshis as decimal strings; empty strings while busy, never zero."
-  method next_address() -> tstr description "`{ ok, address, index }`: a fresh receive address."
+  method next_address() -> tstr description "`{ ok, address, index, fresh, unused, gapLimit }`: a fresh receive address, or with `fresh`\nfalse the first unused one, when `unused` addresses already stand unused and reach `gapLimit`."
+  method current_address() -> tstr description "`{ ok, address, index }`: the first unused receive address, revealed only when none is."
   method addresses() -> tstr description "`{ ok, addresses: [{ index, address, used }] }`, the revealed receive addresses."
   method utxos() -> tstr description "`{ ok, utxos: [...] }`, outputs confirmed on the authority's chain."
   method history(page: int) -> tstr description "`{ ok, rows: [{ txid, intent: send|self|combine|fee_bump|receive, amountSat, feeSat,\ncounterparties, height, confirmations, time, state, reportedBy, beyondGap }] }`, newest first."
-  method fee_rates() -> tstr description "`{ ok, fast, normal, slow, minimum, sources }` in sat/vB."
+  method fee_rates() -> tstr description "`{ ok, fast, normal, slow, minimum, sources, estimated }` in sat/vB, once every level has an\nestimate; until then `{ ok: false, error: \"no fee estimate yet\" }`."
   method address_valid(text: tstr, network: tstr) -> tstr description "An address or BIP21 URI on a network: `{ ok, valid, address, type, amountSat? }`."
   method sources_status() -> tstr description "`{ ok, proxy, crossCheck, sources: [{ id, roles, state, suspect, lastSync, error, ... }] }`."
   method exposure() -> tstr description "`{ ok, servers: [{ source, url, operator, role, since, last }] }`."
