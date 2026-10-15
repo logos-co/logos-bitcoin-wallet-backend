@@ -27,8 +27,12 @@ pub fn effective_network(status: Option<&Value>, active: &str) -> String {
 }
 
 /// Progress to the authority's tip from the birthday, or from `rescanFrom` while a rescan runs.
-/// None while a height is unknown: a percentage of a chain nobody read is no answer.
+/// None while a height is unknown, or while the chain's headers are still read: a percentage of a
+/// chain nobody read is no answer.
 pub fn sync_percent(status: &Value) -> Option<u64> {
+    if status["authority"]["headers"].is_object() {
+        return None;
+    }
     let tip = status["authority"]["height"].as_u64().filter(|t| *t > 0)?;
     if status["rescanFrom"].as_u64().is_some() {
         // Kyoto restarts at rescanFrom and reports its share done; other scans report no height.
@@ -58,7 +62,7 @@ pub fn sync_view(status: &Value) -> Value {
     json!({
         "state": status["state"], "network": status["network"], "walletTip": status["walletTip"],
         "authorityHeight": status["authority"]["height"], "tipAgeSecs": status["authority"]["tipAgeSecs"],
-        "percent": sync_percent(status), "synced": status["synced"],
+        "percent": sync_percent(status), "synced": status["synced"], "headers": status["authority"]["headers"],
     })
 }
 
@@ -122,6 +126,23 @@ mod tests {
         assert_eq!(sync_percent(&e), None, "a full scan reports no height");
         let done = json!({"authority": {"height": 1000, "kind": "electrum_headers"}, "walletTip": 1000, "rescanFrom": null});
         assert_eq!(sync_percent(&done), Some(100));
+    }
+
+    #[test]
+    fn a_header_download_passes_through_with_no_percentage() {
+        // The wallet's tip follows the chain's while its headers come in: 100% would say done.
+        let st = json!({"state": "syncing", "walletTip": 84000, "synced": false,
+                        "authority": {"kind": "electrum_headers", "height": 84000, "peers": 1, "asked": true, "headers": {"have": 84000, "target": 157000}}});
+        assert_eq!(sync_percent(&st), None);
+        let v = status_view(st.clone(), "testnet4", None, None);
+        assert_eq!((v["authority"]["headers"].clone(), v.get("syncPercent")), (st["authority"]["headers"].clone(), None));
+        let s = sync_view(&st);
+        assert_eq!((s["headers"].clone(), s["percent"].clone()), (json!({"have": 84000, "target": 157000}), Value::Null));
+        // Kyoto's peers' tip is unknown; at the tip the core says null.
+        let k = json!({"authority": {"kind": "kyoto", "height": 50, "headers": {"have": 6000, "target": null}}, "walletTip": 50});
+        assert_eq!((sync_percent(&k), sync_view(&k)["headers"]["target"].clone()), (None, Value::Null));
+        let done = json!({"authority": {"height": 157000, "headers": null}, "walletTip": 157000});
+        assert_eq!((sync_percent(&done), sync_view(&done)["headers"].clone()), (Some(100), Value::Null));
     }
 
     #[test]

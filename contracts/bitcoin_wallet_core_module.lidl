@@ -8,7 +8,7 @@ module bitcoin_wallet_core_module {
   method job_result(job_id: tstr, receipt: tstr) -> tstr description "`{ ok, result }` once done."
   method ack_job(job_id: tstr, receipt: tstr) -> bool
   method cancel_job(job_id: tstr, receipt: tstr) -> bool
-  method status() -> tstr description "`{ ok, state, network, group, family, authority: { kind, height, tipAgeSecs, peers, asked }, synced,\nbusy, needsBirthday, gapLimit, openHandle?, approvalHandle?, ... }`; `asked` is false until the\nopen's first round of asking the chain's sources ends. Never waits on the wallet."
+  method status() -> tstr description "`{ ok, state, network, group, family, authority: { kind, height, tipAgeSecs, peers, asked, headers },\nsynced, busy, needsBirthday, gapLimit, openHandle?, approvalHandle?, ... }`; `asked` is false until\nthe open's first round of asking the chain's sources ends or a server's first headers are taken;\n`headers` is `{ have, target }` while the chain's headers come in (`target` null for Kyoto), else\nnull. Never waits on the wallet."
   method balance() -> tstr description "`{ ok, confirmed, waiting, pending, sent, immature, tooSmall: { count, sat }, beyondGap: { count,\nsat, confirmedSat } }`, satoshis as decimal strings; empty strings while busy, never zero."
   method next_address() -> tstr description "`{ ok, address, index, fresh, unused, gapLimit }`: a fresh receive address, or with `fresh`\nfalse the first unused one, when `unused` addresses already stand unused and reach `gapLimit`."
   method current_address() -> tstr description "`{ ok, address, index }`: the first unused receive address, revealed only when none is."
