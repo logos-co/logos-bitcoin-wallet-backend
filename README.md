@@ -138,10 +138,12 @@ doubling to 5 s, and stops once unload begins.
 ## Everything else
 
 Reads pass through with display amounts (`…Btc`, eight decimals) and `syncPercent`, counted
-from the wallet's birthday and absent while a height is unknown. Everything else the core says
-passes as it is: `lastReorg`, `rescanFrom`, `birthdaySource`, `node`, `kyoto` and the authority's
-`kind`, `base` and `asked` (false until the open's first round of asking the chain's sources ends) in
-`wallet_status`; `blockHash`, `sendState`, `confirmedVia` and the `unchecked`
+from the wallet's birthday and absent while a height is unknown or the chain's headers are still
+coming in. Everything else the core says passes as it is: `lastReorg`, `rescanFrom`,
+`birthdaySource`, `node`, `kyoto` and the authority's `kind`, `base`, `asked` (false until the
+open's first round of asking the chain's sources ends, or a server's first headers are taken) and
+`headers` (`{ have, target }` during a header download, `target` null for Kyoto; null otherwise) in
+`wallet_status`, and `headers` in `sync_progress` too; `blockHash`, `sendState`, `confirmedVia` and the `unchecked`
 state on history rows; `authority_suspect` and `unchecked_anchor` alerts. `balances` gives
 `unchecked` its `uncheckedBtc` twin like every other amount, and `beyondGap` its `beyondGapBtc`. A busy core answers empty
 amounts, never zero. `receive_address` is the core's `next_address`: a fresh address, or, once
@@ -162,7 +164,7 @@ Networks: `mainnet`, `testnet4`, `signet`, and `regtest` when the persistence di
 The wallet core's and the node module's contracts are committed under `contracts/` and named
 by `dependency_overrides` in `metadata.json`, so the module builds without their sources.
 Regenerate them from each module's `glue.rs` with `logos-lidl-gen --from-rust` when either
-changes. The core's is generated from its glue at 6e11546.
+changes. The core's is generated from its glue at 82ac6db.
 
 ```bash
 cd rust-lib && cargo test --no-default-features

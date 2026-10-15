@@ -54,8 +54,9 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     /// `{ ok, jobId }`; the job's result is `{ gapLimit, rescanFrom }`. Refusal codes: invalid, busy, no_wallet.
     fn set_gap_limit(&self, params_json: String) -> String;
 
-    /// The core's status, `gapLimit` and `authority.asked` included, plus `syncPercent`, `activeNetwork`,
-    /// `label` and `openSend`.
+    /// The core's status, `gapLimit`, `authority.asked` and `authority.headers` (`{ have, target }` while
+    /// the chain's headers come in, else null) included, plus `syncPercent` (none during that download),
+    /// `activeNetwork`, `label` and `openSend`.
     fn wallet_status(&self) -> String;
     /// `{ ok, busy, confirmed, waiting, pending, sent, immature, tooSmall, beyondGap: { count, sat, confirmedSat } }`
     /// in satoshis, each with a `…Btc` twin. beyondGap is coins past the gap limit, confirmedSat its confirmed
@@ -129,7 +130,8 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
 pub trait BitcoinWalletBackendModuleEvents {
     /// wallet_status()'s shape, whenever the core's state changes.
     fn wallet_state_changed(&self, payload: String);
-    /// `{ state, network, walletTip, authorityHeight, tipAgeSecs, percent, synced }`, on change.
+    /// `{ state, network, walletTip, authorityHeight, tipAgeSecs, percent, synced, headers }`, on change;
+    /// `headers` is the core's header download, `{ have, target }` or null.
     fn sync_progress(&self, payload: String);
     /// balances()'s shape, when an amount the core read changes.
     fn balance_changed(&self, payload: String);
@@ -747,7 +749,7 @@ fn slow_tick(inner: &Shared, check_node: bool) {
         }
     }
     let sync = view::sync_view(&status);
-    let digest = json!([sync["state"], sync["network"], sync["walletTip"], sync["authorityHeight"], sync["percent"], sync["synced"]]).to_string();
+    let digest = json!([sync["state"], sync["network"], sync["walletTip"], sync["authorityHeight"], sync["percent"], sync["synced"], sync["headers"]]).to_string();
     let changed = {
         let mut g = lock(inner);
         let c = g.last_sync != digest;
