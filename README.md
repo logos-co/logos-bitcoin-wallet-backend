@@ -94,9 +94,10 @@ wallet open, in the core.
   (custodian, `unknown` only) has the core free its coins and marks the send `abandoned`: if the
   original still confirms, a later send from those coins fails, or replaces it if it confirms first.
 - A failed or cancelled send carries `errorCode`: the core's `rejected`, `expired`, `cancelled`,
-  `insufficient_funds`, `no_route`, `busy`, `refused`, `no_wallet`, `signer_unavailable`, `invalid`
-  or `failed`, or the backend's `coins_changed`, `core_lost` or `backend_restarted`. A core that
-  sends no code is read by its error text.
+  `insufficient_funds`, `dust`, `no_route`, `busy`, `refused`, `no_wallet`, `signer_unavailable`,
+  `invalid` or `failed`, or the backend's `coins_changed`, `core_lost` or `backend_restarted`. A
+  core that sends no code is read by its error text. `dust` is an amount below the recipient's
+  dust limit, which `address_valid` gives as `dustSat`.
 - Sends are kept in `sends.json`, which holds no receipt, key or password. After a restart an
   open send is reconciled with the core: a preview still awaiting approval is followed, one built
   but never signed is signed, and one the core no longer has is settled from the wallet's history.
@@ -164,7 +165,7 @@ Networks: `mainnet`, `testnet4`, `signet`, and `regtest` when the persistence di
 The wallet core's and the node module's contracts are committed under `contracts/` and named
 by `dependency_overrides` in `metadata.json`, so the module builds without their sources.
 Regenerate them from each module's `glue.rs` with `logos-lidl-gen --from-rust` when either
-changes. The core's is generated from its glue at 7a13513.
+changes. The core's is generated from its glue at dbb7cf5.
 
 ```bash
 cd rust-lib && cargo test --no-default-features

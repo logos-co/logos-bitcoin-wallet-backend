@@ -815,6 +815,8 @@ pub fn code_of(e: &str) -> &'static str {
         "expired"
     } else if l.starts_with("cancelled") {
         "cancelled"
+    } else if l.contains("the smallest amount") && l.contains("can receive") {
+        "dust"
     } else if l.contains("insufficient funds") {
         "insufficient_funds"
     } else if l.contains("no source is enabled for broadcast") || l.contains("no broadcast source") || l.contains("no history server") || l.contains("no tip") {
@@ -1067,6 +1069,19 @@ mod tests {
         assert_eq!(s.cancel_failed(&id, "too late: the transaction is going out"), None);
         assert!(s.get(&id).unwrap().withdrawal.is_none());
         assert_eq!(s.signed(&id, &json!({"broadcast": "seen"})), Some(State::Sent), "what happened wins");
+    }
+
+    #[test]
+    fn a_build_refused_as_dust_keeps_the_cores_words() {
+        const DUST: &str = "The smallest amount this address can receive is 294 sats.";
+        for code in [Some("dust"), None] {
+            let mut s = Sends::default();
+            let id = s.begin(Kind::Send, "some_dapp", "regtest", "g_1", json!({}), 1).unwrap();
+            s.set_build_job(&id, "b1");
+            assert_eq!(s.build_failed(&id, DUST, code), Some(State::Failed));
+            let st = s.status_json(&id);
+            assert_eq!((st["error"].as_str(), st["errorCode"].as_str()), (Some(DUST), Some("dust")), "{code:?}");
+        }
     }
 
     #[test]
