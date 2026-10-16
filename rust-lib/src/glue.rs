@@ -73,7 +73,8 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     /// `{ ok, fast, normal, slow, minimum, sources, estimated }` in sat/vB, or `{ ok: false, error }` until
     /// every level has an estimate.
     fn fee_rates(&self) -> String;
-    /// An address or BIP21 URI on the wallet's network: `{ ok, valid, address, type, amountSat?, reason? }`.
+    /// An address or BIP21 URI on the wallet's network: `{ ok, valid, address, type, dustSat, amountSat?, reason? }`;
+    /// `dustSat` is the least it can receive, below which a send fails with errorCode `dust`.
     fn address_valid(&self, text: String) -> String;
     /// Satoshis, a decimal string, as BTC: `{ ok, sat, btc }`.
     fn format_btc(&self, sat: String) -> String;

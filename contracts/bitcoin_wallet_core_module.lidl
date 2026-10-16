@@ -16,7 +16,7 @@ module bitcoin_wallet_core_module {
   method utxos() -> tstr description "`{ ok, utxos: [...] }`, outputs confirmed on the authority's chain."
   method history(page: int) -> tstr description "`{ ok, rows: [{ txid, intent: send|self|combine|fee_bump|receive, amountSat, feeSat,\ncounterparties, height, confirmations, time, state, reportedBy, beyondGap }] }`, newest first."
   method fee_rates() -> tstr description "`{ ok, fast, normal, slow, minimum, sources, estimated }` in sat/vB, once every level has an\nestimate; until then `{ ok: false, error: \"no fee estimate yet\" }`."
-  method address_valid(text: tstr, network: tstr) -> tstr description "An address or BIP21 URI on a network: `{ ok, valid, address, type, amountSat? }`."
+  method address_valid(text: tstr, network: tstr) -> tstr description "An address or BIP21 URI on a network: `{ ok, valid, address, type, dustSat, amountSat? }`; `dustSat`\nis the least it can receive, below which build_send fails with code `dust`."
   method sources_status() -> tstr description "`{ ok, proxy, crossCheck, sources: [{ id, roles, state, suspect, lastSync, error, ... }] }`."
   method exposure() -> tstr description "`{ ok, servers: [{ source, url, operator, role, since, last }] }`."
   method descriptors() -> tstr description "The wallet's public descriptors, as the keystore gave them. Backend only."
