@@ -3,10 +3,11 @@
 `bitcoin_wallet_backend`: the coordinator between the Bitcoin wallet surfaces (the app, the
 CLI, any module that asks for a payment) and `bitcoin_wallet_core_module`. It keeps the
 custodian role, a registry of wallets opened before, and every send from request to
-settlement, and it relays the source settings of `bitcoin_node_module`. It holds no key
-material and takes no password: the person opens a wallet in the keys app and approves a
-send in the signer app. It calls neither `signer_manager_module` nor `keystore_module`; the
-wallet core is the requester and keeps the receipts, and this module sees only handles.
+settlement, and it relays the source settings of `bitcoin_node_module`. It holds no wallet
+key material and takes no password: the person opens a wallet in the keys app and approves a
+send in the signer app. Of `signer_manager_module` it asks only its own keys for its files
+([Wallet data](#wallet-data)), and it never calls `keystore_module`; the wallet core is the
+requester and keeps the receipts, and this module sees only handles.
 
 ## Roles
 
@@ -36,8 +37,14 @@ A refused call answers exactly `{"ok":false,"error":"not authorized"}`.
 A `group` reopens a wallet; a `family` (`bitcoin` for native segwit, `bitcoin_taproot`) lets
 the person pick, create or restore one. It answers `{ ok, jobId }`. While the person decides,
 `wallet_status` carries the core's `openHandle`, which the app passes to the
-`keystore.accounts.open` intent. Once open, the wallet is recorded in `wallets.json` with its
-group, family, network, label, birthday and gap limit, and nothing secret.
+`keystore.accounts.open` intent. Once open, the wallet is recorded in the registry with its
+group, its `seed` (the signer manager's wallet, from the core's open result), family, network,
+label, birthday and gap limit, and nothing secret. `wallet_status` passes the core's `seed` on.
+
+`list_wallets` answers `{ ok, active, wallets, locked }`: the wallets opened before whose seed is
+unlocked in the Signer app, newest first, each with its `seed`, and `locked`, the core's count of
+the active network's seeds whose wallets it can't list (0 when the core doesn't answer). Wallets
+the core lists that the registry never saw are added to it.
 
 `set_birthday({ date: "YYYY-MM-DD" } | { height })` gives the open wallet a birthday later, for a
 restore that had none: `{ ok, jobId }`, and the job's result is `{ birthday: { height, source },
@@ -52,8 +59,8 @@ stored one, or 20. `set_gap_limit({ gapLimit })` changes it for the open wallet,
 setting rather than a source one, so an open wallet doesn't stop it: `{ ok, jobId }`, and the
 job's result is `{ gapLimit, rescanFrom }`; a raise scans again from the birthday. A value out of
 range is refused here with `code: "invalid"`, a closed wallet with `no_wallet`, and the core's
-own codes (`invalid`, `busy`) pass through. `wallet_status.gapLimit` is the core's, and
-`wallets.json` follows it. Coins found past the limit stay spendable but are listed apart:
+own codes (`invalid`, `busy`) pass through. `wallet_status.gapLimit` is the core's, and the
+registry follows it. Coins found past the limit stay spendable but are listed apart:
 `balances.beyondGap { count, sat, confirmedSat }` with `beyondGapBtc` and `beyondGapConfirmedBtc`
 (all of them, and the confirmed part), left out of `confirmed`, `waiting`, `pending` and `sent`,
 and `beyondGap` on every history row, true when the wallet's part is only through such
@@ -98,8 +105,9 @@ wallet open, in the core.
   `invalid` or `failed`, or the backend's `coins_changed`, `core_lost` or `backend_restarted`. A
   core that sends no code is read by its error text. `dust` is an amount below the recipient's
   dust limit, which `address_valid` gives as `dustSat`.
-- Sends are kept in `sends.json`, which holds no receipt, key or password. After a restart an
-  open send is reconciled with the core: a preview still awaiting approval is followed, one built
+- Sends are kept per seed in `sends.sealed.json` ([Wallet data](#wallet-data)), which holds no
+  receipt, key or password. After a restart, once its seed's sends open, an open send is
+  reconciled with the core: a preview still awaiting approval is followed, one built
   but never signed is signed, and one the core no longer has is settled from the wallet's history.
   The core's own send record comes first, as its answer would have: a row's `broadcast` `seen` or
   `requested` is `sent`, with `broadcast` and `via` filled in, at once (Kyoto reports no mempool to
@@ -113,6 +121,34 @@ wallet open, in the core.
 - `cancel_send` (the requester or a custodian) withdraws the approval request and unlocks the
   inputs. It is refused once the transaction is going out, and `close_wallet` withdraws open
   sends first.
+
+## Wallet data
+
+Each wallet, a seed, is unlocked once per session in the Signer app. The registry and the sends
+are kept per seed, each seed's document sealed under this module's own key for it from the signer
+manager (`data_key({ seed, scope })` of [logos.wallets/1](https://github.com/logos-co/logos-signer-interface/blob/main/docs/wallets.md),
+scopes `wallets` and `sends`), in `wallets.sealed.json` and `sends.sealed.json` at 0600. The
+files name only the seeds: group ids, labels, addresses, amounts and txids are inside the boxes.
+
+- The keys are asked from a thread of this module's own, never while answering a call: at load,
+  on the manager's `wallets_changed`, and after each open. A document sealed under an earlier
+  generation opens with that generation's key and is sealed again under the current one.
+- Only unlocked seeds' wallets and sends are listed and read. A seed's document that has no key
+  yet waits in memory and is written once one comes; an open recorded while its seed's list is
+  still sealed here is added once it opens. A send of a seed whose sends are still sealed here is
+  refused with `code: "locked"`, since one of them could be open.
+- On the manager's `wallets_locked` both files lock, after the sends are written, and the keys are
+  asked again, so the seeds still unlocked open again. A locked seed's sends are not read or
+  written: its settled ones leave memory at once; one waiting for approval is withdrawn as
+  `close_wallet` withdraws it (`no_wallet`), and the core closes its wallet; one going out keeps
+  going until it settles, then leaves memory. What happened to those meanwhile isn't written, so
+  once the seed unlocks their stored copies are reconciled with the core, as after a restart.
+- `wallets_changed(locked)` is the core's event relayed, and is also emitted when this module's own
+  documents open or lock: `list_wallets` shows other wallets. `locked` is `list_wallets`' count.
+- Request ids start above the clock, in thousandths of a second, at each load, so a new send never
+  takes the id of a locked seed's send.
+- The plain `wallets.json` and `sends.json` of earlier versions are removed unread: no migration.
+  A sealed file that doesn't read is set aside as `*.unreadable`.
 
 ## Switching networks
 
@@ -154,18 +190,21 @@ wallet opens. `fee_rates` is an estimate (`estimated`, with the `sources` it cam
 false, error: "no fee estimate yet" }`, never the floor in its place. `format_btc` and `parse_btc` are exact; more than eight decimals is
 refused. Long operations answer a backend job id (`job_status`); the core's receipts never
 leave this module. Events: `wallet_state_changed`, `sync_progress`, `balance_changed`,
-`send_status_changed`, `job_finished`, `source_alert`.
+`send_status_changed`, `job_finished`, `source_alert`, `wallets_changed`.
 
 Networks: `mainnet`, `testnet4`, `signet`, and `regtest` when the persistence directory holds
 `regtest.json`; the wallet core and the node module need the same file in theirs. Persists
-`roles.json`, `settings.json` (the active network), `wallets.json` and `sends.json`.
+`roles.json`, `settings.json` (the active network), `wallets.sealed.json` and `sends.sealed.json`.
 
 ## Contracts
 
 The wallet core's and the node module's contracts are committed under `contracts/` and named
 by `dependency_overrides` in `metadata.json`, so the module builds without their sources.
 Regenerate them from each module's `glue.rs` with `logos-lidl-gen --from-rust` when either
-changes. The core's is generated from its glue at fc6e7b6.
+changes. The core's is generated from its glue at e484096 (`feat/data-unlock`,
+logos-co/logos-bitcoin-wallet-core-module#17). The signer manager is reached through
+`wallets.lidl` of logos-signer-interface, the `logos-signer-interface` flake input, named by
+`interface_dependencies` and bound to `signer_manager_module` at runtime.
 
 ```bash
 cd rust-lib && cargo test --no-default-features

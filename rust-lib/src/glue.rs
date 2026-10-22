@@ -1,20 +1,23 @@
 //! Logos glue for `bitcoin_wallet_backend` (rust-first, `concurrency: "multi"`). A reactor
 //! follows the core's jobs and sends, and tells the node module which network has a wallet open.
+//! A keys thread opens the registry's and the sends' documents with this module's keys from the
+//! signer manager.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use logos_rust_sdk::{AboutToUnload, LogosCaller, LogosError, Shutdown};
+use logos_signer_interface::wallets::{read_data_key, DataKey, DataKeyRequest};
 use serde_json::{json, Value};
 
 use crate::gate::{self, Caller, Roles};
 use crate::jobs::{Jobs, Purpose};
-use crate::registry::Registry;
+use crate::registry::{Opened, Registry};
 use crate::request;
 use crate::sends::{self, CoreView, Kind, Next, Seen, Sends, Withdrawal};
 use crate::switch::{self, Switch};
@@ -34,8 +37,9 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     /// CUSTODIAN. While a close settles the switch is queued: `{ ok, active, pending }`, and opens are
     /// refused with code busy until it applies. Refusals carry `code`: busy, wallet_open, send_open.
     fn set_active_network(&self, network: String) -> String;
-    /// `{ ok, active, wallets: [{ group, family, network, label, birthday, gapLimit, firstOpened, lastOpened }] }`:
-    /// wallets opened before, newest first. No secrets.
+    /// `{ ok, active, wallets: [{ group, seed, family, network, label, birthday, gapLimit, firstOpened, lastOpened }],
+    /// locked }`: wallets opened before whose seed is unlocked, newest first; `locked` is the core's count of the
+    /// active network's seeds it can't list, 0 when it can't be asked. No secrets.
     fn list_wallets(&self) -> String;
     /// CUSTODIAN. `{ network?, group?, family?, birthday?, label?, gapLimit? }` on the active network; gapLimit
     /// 20 to 1000, else the core's 20 or the wallet's stored one. `{ ok, jobId }`; wallet_status carries
@@ -54,8 +58,8 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     /// `{ ok, jobId }`; the job's result is `{ gapLimit, rescanFrom }`. Refusal codes: invalid, busy, no_wallet.
     fn set_gap_limit(&self, params_json: String) -> String;
 
-    /// The core's status, `gapLimit`, `authority.asked` and `authority.headers` (`{ have, target }` while
-    /// the chain's headers come in, else null) included, plus `syncPercent` (none during that download),
+    /// The core's status, `seed`, `gapLimit`, `authority.asked` and `authority.headers` (`{ have, target }`
+    /// while the chain's headers come in, else null) included, plus `syncPercent` (none during that download),
     /// `activeNetwork`, `label` and `openSend`.
     fn wallet_status(&self) -> String;
     /// `{ ok, busy, confirmed, waiting, pending, sent, immature, tooSmall, beyondGap: { count, sat, confirmedSat } }`
@@ -127,7 +131,7 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     fn on_context_ready(&self, _ctx: &RustModuleContext) {}
 }
 
-#[allow(dead_code)] // Read by logos-lidl-gen, which generates the emitters.
+#[allow(dead_code, non_snake_case)] // Read by logos-lidl-gen, which generates the emitters.
 pub trait BitcoinWalletBackendModuleEvents {
     /// wallet_status()'s shape, whenever the core's state changes.
     fn wallet_state_changed(&self, payload: String);
@@ -141,6 +145,9 @@ pub trait BitcoinWalletBackendModuleEvents {
     fn job_finished(&self, job_id: String, state: String);
     /// The core's alert about a source: `{ source, kind, detail, at, network, group }`.
     fn source_alert(&self, payload: String);
+    /// list_wallets shows other wallets: a seed was unlocked or locked in the Signer app, as the core
+    /// says or as this module's own documents open or lock. `locked` is list_wallets' `locked`.
+    fn wallets_changed(&self, locked: i64);
 }
 
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/generated/provider_gen.rs"));
@@ -162,20 +169,25 @@ static UNANSWERED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// Waits for an async reply on this thread. A blocking call would wait in a nested event loop
 /// on the main thread, where concurrent calls return innermost first. Unload answers at once.
 fn wait<T>(rx: Receiver<Result<T, LogosError>>, budget: Duration) -> Result<T, String> {
+    let r = answer(rx, budget);
+    if r.is_err() && !UNLOADING.load(Ordering::SeqCst) {
+        UNANSWERED.fetch_add(1, Ordering::SeqCst);
+    }
+    r
+}
+
+/// As wait, without counting a miss: the signer manager's silence doesn't slow the reactor.
+fn answer<T>(rx: Receiver<Result<T, LogosError>>, budget: Duration) -> Result<T, String> {
     let start = Instant::now();
     loop {
         if UNLOADING.load(Ordering::SeqCst) {
             return Err("unloading".into());
         }
-        let r = match rx.recv_timeout(Duration::from_millis(100)) {
+        return match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(r) => r.map_err(|e| e.to_string()),
             Err(RecvTimeoutError::Timeout) if start.elapsed() < budget + Duration::from_secs(1) => continue,
             Err(_) => Err("no answer".into()),
         };
-        if r.is_err() && !UNLOADING.load(Ordering::SeqCst) {
-            UNANSWERED.fetch_add(1, Ordering::SeqCst);
-        }
-        return r;
     }
 }
 
@@ -198,6 +210,152 @@ fn core() -> &'static CoreClient {
 fn node() -> &'static NodeClient {
     static N: OnceLock<NodeClient> = OnceLock::new();
     N.get_or_init(NodeClient::new)
+}
+
+/// The module behind `logos.wallets/1`, bound at runtime: it depends on the core, which this
+/// module depends on.
+const WALLETS: &str = "signer_manager_module";
+/// `data_key` scopes: the registry's lists and the sends.
+const WALLETS_SCOPE: &str = "wallets";
+const SENDS_SCOPE: &str = "sends";
+
+fn manager() -> &'static wallets::WalletsClient {
+    static M: OnceLock<wallets::WalletsClient> = OnceLock::new();
+    M.get_or_init(|| wallets::WalletsClient::bind(WALLETS))
+}
+
+/// What the keys thread is asked to do.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ask {
+    /// Open every document that waits for a key.
+    Keys,
+    /// Wallets were locked: lock every document, then ask again.
+    Locked,
+}
+
+/// Held while documents lock and open again, so the reactor drops no send meanwhile.
+static KEYS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn ask(inner: &Shared, a: Ask) {
+    if let Some(tx) = lock(inner).asks.as_ref() {
+        let _ = tx.send(a);
+    }
+}
+
+/// This module's key for one scope of a seed's data; None while the seed is locked or the manager
+/// is away. Only from this module's own threads: from a call the manager made, it waits on itself.
+fn data_key(seed: &str, scope: &str, generation: Option<u32>) -> Option<DataKey> {
+    let body = serde_json::to_string(&DataKeyRequest { seed: seed.into(), scope: scope.into(), generation }).ok()?;
+    let (tx, rx) = sync_channel(1);
+    manager().data_key_async_with_timeout(&body, READ, move |r| {
+        let _ = tx.send(r);
+    });
+    read_data_key(&answer(rx, READ).ok()?).ok()
+}
+
+/// The key a document is sealed under and the current one, the same when its generation is.
+fn keys(seed: &str, scope: &str, sealed_under: Option<u32>) -> Option<(DataKey, DataKey)> {
+    let current = data_key(seed, scope, None)?;
+    let box_key = match sealed_under {
+        Some(g) if g != current.generation => data_key(seed, scope, Some(g))?,
+        _ => current.clone(),
+    };
+    Some((box_key, current))
+}
+
+/// Opens every document that waits for its key, sealed again under the current generation; a
+/// locked seed answers `locked` and stays closed. True if any opened.
+fn open_wallets(inner: &Shared) -> bool {
+    let (wallets, sends) = {
+        let g = lock(inner);
+        (g.registry.closed(), g.sends.closed())
+    };
+    let mut opened = false;
+    for (seed, under) in wallets {
+        let Some((box_key, current)) = keys(&seed, WALLETS_SCOPE, under) else { continue };
+        match lock(inner).registry.unlock(&seed, &box_key, &current) {
+            Ok(()) => opened = true,
+            Err(e) => eprintln!("bitcoin_wallet_backend: a wallet list didn't open: {e}"),
+        }
+    }
+    for (seed, under) in sends {
+        let Some((box_key, current)) = keys(&seed, SENDS_SCOPE, under) else { continue };
+        match lock(inner).sends.unlock(&seed, &box_key, &current) {
+            Ok(()) => opened = true,
+            Err(e) => eprintln!("bitcoin_wallet_backend: a wallet's sends didn't open: {e}"),
+        }
+    }
+    if opened {
+        save_sends(inner);
+    }
+    opened
+}
+
+/// Wallets were locked: what was read under their keys goes, saved first, and what is still
+/// unlocked opens again. A locked wallet's waiting sends are withdrawn, as a close does; one going
+/// out keeps going. True if what can be read changed.
+fn lock_wallets(inner: &Shared) -> bool {
+    lock(inner).sends.mark_dirty();
+    save_sends(inner);
+    let before = {
+        let mut g = lock(inner);
+        let seen = (g.registry.readable_seeds(), g.sends.readable_seeds());
+        g.registry.lock();
+        g.sends.lock();
+        seen
+    };
+    open_wallets(inner);
+    let waiting = lock(inner).sends.locked_waiting();
+    for id in waiting {
+        let _ = withdraw(inner, &id, Withdrawal::WalletClosed);
+    }
+    save_sends(inner);
+    drop_locked_sends(inner);
+    let g = lock(inner);
+    before != (g.registry.readable_seeds(), g.sends.readable_seeds())
+}
+
+/// Forgets a locked wallet's settled sends once no job of theirs runs; they read again once it
+/// unlocks.
+fn drop_locked_sends(inner: &Shared) {
+    let mut g = lock(inner);
+    let busy = g.jobs.requests_in_flight();
+    g.sends.drop_locked(&busy);
+}
+
+/// The core's count of the active network's seeds it can't list; 0 when it doesn't answer.
+fn core_locked(inner: &Shared) -> i64 {
+    let active = lock(inner).active.clone();
+    ipc!(core(), list_wallets_async_with_timeout, READ, &active).and_then(|s| parse(s, "wallet core")).map_or(0, |v| v["locked"].as_i64().unwrap_or(0))
+}
+
+/// One ask at a time, from this thread only: at load, on the manager's wallets_changed, after each
+/// open and on wallets_locked. A burst is one ask; a lock among it locks first.
+fn keys_thread(inner: Shared, rx: Receiver<Ask>) {
+    nap(Duration::from_millis(700));
+    let mut next = Some(Ask::Keys);
+    while !UNLOADING.load(Ordering::SeqCst) {
+        let first = match next.take().map(Ok).unwrap_or_else(|| rx.recv_timeout(Duration::from_millis(200))) {
+            Ok(a) => a,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+        let mut locked = first == Ask::Locked;
+        while let Ok(a) = rx.try_recv() {
+            locked |= a == Ask::Locked;
+        }
+        let changed = {
+            let _k = KEYS.lock().unwrap_or_else(|e| e.into_inner());
+            if locked {
+                lock_wallets(&inner)
+            } else {
+                open_wallets(&inner)
+            }
+        };
+        if changed && !UNLOADING.load(Ordering::SeqCst) {
+            emit_wallets_changed(core_locked(&inner));
+        }
+    }
 }
 
 fn refused() -> String {
@@ -288,6 +446,8 @@ struct Inner {
     node_ready: bool,
     last_sync: String,
     last_balance: Option<String>,
+    /// The keys thread, once the context is ready.
+    asks: Option<Sender<Ask>>,
 }
 
 impl Default for Inner {
@@ -304,6 +464,7 @@ impl Default for Inner {
             node_ready: false,
             last_sync: String::new(),
             last_balance: None,
+            asks: None,
         }
     }
 }
@@ -462,18 +623,23 @@ fn finish(inner: &Shared, jid: &str, state: &str, result: Value, error: String, 
     match purpose {
         Purpose::Open { network, label, gap_limit } => {
             if done {
-                let mut g = lock(inner);
-                let net = result["network"].as_str().unwrap_or(network.as_str()).to_string();
-                let (group, family) = (result["group"].as_str().unwrap_or_default(), result["family"].as_str().unwrap_or_default());
-                if let Err(e) = g.registry.record_open(&net, group, family, label.as_deref(), result["birthday"].clone(), now_secs()) {
+                let text = |k: &str| result[k].as_str().unwrap_or_default().to_string();
+                let opened = Opened {
+                    network: result["network"].as_str().unwrap_or(network.as_str()).to_string(),
+                    group: text("group"),
+                    seed: text("seed"),
+                    family: text("family"),
+                    label,
+                    birthday: result["birthday"].clone(),
+                    // The core's word, else what was asked; the status sync fills in a default.
+                    gap_limit: result["gapLimit"].as_u64().or(gap_limit),
+                    now: now_secs(),
+                };
+                if let Err(e) = lock(inner).registry.record_open(opened) {
                     eprintln!("bitcoin_wallet_backend: {e}");
                 }
-                // The core's word, else what was asked; the status sync fills in a default.
-                if let Some(gap) = result["gapLimit"].as_u64().or(gap_limit) {
-                    if let Err(e) = g.registry.set_gap_limit(&net, group, gap) {
-                        eprintln!("bitcoin_wallet_backend: {e}");
-                    }
-                }
+                // The seed's documents may wait for its key.
+                ask(inner, Ask::Keys);
             } else {
                 set_wallet_open(inner, &network, false);
             }
@@ -560,15 +726,15 @@ fn finish(inner: &Shared, jid: &str, state: &str, result: Value, error: String, 
     }
 }
 
-/// Saves sends.json when a send changed; a failed write is tried again next tick.
+/// Seals each seed's sends when one changed; a failed write is tried again next tick. A locked
+/// seed's are written once its key comes.
 fn save_sends(inner: &Shared) {
     let mut g = lock(inner);
     if !g.sends.take_dirty() {
         return;
     }
-    let Some(dir) = g.dir.clone() else { return };
-    if let Err(e) = write_atomic(&dir.join("sends.json"), g.sends.to_json().to_string().as_bytes()) {
-        eprintln!("bitcoin_wallet_backend: sends.json: {e}");
+    if let Err(e) = g.sends.save() {
+        eprintln!("bitcoin_wallet_backend: {e}");
         g.sends.mark_dirty();
     }
 }
@@ -801,6 +967,12 @@ fn reactor(inner: Shared) {
             slow_tick(&inner, (tick / 6) % 3 == 0);
         }
         save_sends(&inner);
+        // A locked wallet's send that was still going out goes from memory once it settles.
+        let keys = KEYS.try_lock();
+        if !matches!(keys, Err(std::sync::TryLockError::WouldBlock)) {
+            drop_locked_sends(&inner);
+        }
+        drop(keys);
         tick += 1;
         // A module that stopped answering is asked again after 100 ms, doubling to 5 s.
         pause = switch::backoff(pause, UNANSWERED.load(Ordering::SeqCst) > before);
@@ -808,15 +980,18 @@ fn reactor(inner: Shared) {
     }
 }
 
-/// Relays one of the core's events while this module is loaded, resubscribing if it drops.
+/// Relays one of the core's events, or passes one of the signer manager's to the keys thread,
+/// while this module is loaded, resubscribing if it drops.
 fn listen(name: &'static str, inner: Shared) {
     nap(Duration::from_millis(700));
     let mut pause = None;
     while !UNLOADING.load(Ordering::SeqCst) {
-        let mut c = CoreClient::new();
         let sub = match name {
-            "walletStateChanged" => c.on_wallet_state_changed(),
-            _ => c.on_source_alert(),
+            "walletStateChanged" => CoreClient::new().on_wallet_state_changed(),
+            "walletsChanged" => CoreClient::new().on_wallets_changed(),
+            "wallets_changed" => wallets::WalletsClient::bind(WALLETS).on_wallets_changed(),
+            "wallets_locked" => wallets::WalletsClient::bind(WALLETS).on_wallets_locked(),
+            _ => CoreClient::new().on_source_alert(),
         };
         let Ok(sub) = sub else {
             pause = switch::backoff(pause, true);
@@ -829,8 +1004,16 @@ fn listen(name: &'static str, inner: Shared) {
             if UNLOADING.load(Ordering::SeqCst) {
                 break;
             }
-            if name == "walletStateChanged" {
-                if let Some(e) = CoreClient::decode_wallet_state_changed(&ev) {
+            match name {
+                "wallets_changed" => ask(&inner, Ask::Keys),
+                "wallets_locked" => ask(&inner, Ask::Locked),
+                "walletsChanged" => {
+                    if let Some(e) = CoreClient::decode_wallets_changed(&ev) {
+                        emit_wallets_changed(e.locked);
+                    }
+                }
+                "walletStateChanged" => {
+                    let Some(e) = CoreClient::decode_wallet_state_changed(&ev) else { continue };
                     let Ok(st) = serde_json::from_str::<Value>(&e.payload) else { continue };
                     let v = {
                         let g = lock(&inner);
@@ -839,8 +1022,11 @@ fn listen(name: &'static str, inner: Shared) {
                     };
                     emit_wallet_state_changed(&v.to_string());
                 }
-            } else if let Some(e) = CoreClient::decode_source_alert(&ev) {
-                emit_source_alert(&e.payload);
+                _ => {
+                    if let Some(e) = CoreClient::decode_source_alert(&ev) {
+                        emit_source_alert(&e.payload);
+                    }
+                }
             }
         }
     }
@@ -876,8 +1062,14 @@ impl BitcoinWalletBackendModuleImpl {
         if !matches!(st["state"].as_str(), Some("syncing" | "ready")) {
             return err("no wallet is open");
         }
-        let (network, group) = (st["network"].as_str().unwrap_or_default().to_string(), st["group"].as_str().unwrap_or_default().to_string());
-        let rid = match lock(&self.inner).sends.begin(kind, requester, &network, &group, params.clone(), now_secs()) {
+        let text = |k: &str| st[k].as_str().unwrap_or_default().to_string();
+        let (network, group, seed) = (text("network"), text("group"), text("seed"));
+        // Its seed's sends aren't read yet, so one may be open: the keys thread is asked again.
+        if lock(&self.inner).sends.is_locked(&seed) {
+            ask(&self.inner, Ask::Keys);
+            return coded("locked", sends::LOCKED);
+        }
+        let rid = match lock(&self.inner).sends.begin(kind, requester, &network, &group, &seed, params.clone(), now_secs()) {
             Ok(r) => r,
             Err(e) => return err(e),
         };
@@ -968,16 +1160,19 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
 
     fn list_wallets(&self) -> String {
         let active = lock(&self.inner).active.clone();
-        // Wallets the core has on disk that this registry never saw, best effort.
+        // Unlocked seeds' wallets the core has that this registry never saw, best effort; the
+        // core counts the seeds it can't list.
+        let mut locked = 0;
         if let Ok(v) = ipc!(core(), list_wallets_async_with_timeout, READ, &active).and_then(|s| parse(s, "wallet core")) {
+            locked = v["locked"].as_i64().unwrap_or(0);
             let mut g = lock(&self.inner);
             for w in v["wallets"].as_array().cloned().unwrap_or_default() {
-                let (group, family) = (w["group"].as_str().unwrap_or_default(), w["family"].as_str().unwrap_or_default());
-                let _ = g.registry.discover(&active, group, family);
+                let text = |k: &str| w[k].as_str().unwrap_or_default().to_string();
+                let _ = g.registry.discover(&active, &text("group"), &text("seed"), &text("family"));
             }
         }
         let g = lock(&self.inner);
-        ok(json!({"active": g.active, "wallets": g.registry.list_json()}))
+        ok(json!({"active": g.active, "wallets": g.registry.list_json(), "locked": locked}))
     }
 
     fn open_wallet(&self, params_json: String) -> String {
@@ -1395,20 +1590,25 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
                     }
                 }
             }
-            g.registry = Registry::new(Some(dir.join("wallets.json")));
-            // Sends survive a restart; open ones are reconciled with the core's previews.
-            match std::fs::read_to_string(dir.join("sends.json")).map(|t| serde_json::from_str::<Value>(&t)) {
-                Ok(Ok(v)) => g.sends = Sends::load(&v, Instant::now()),
-                Ok(Err(e)) => eprintln!("bitcoin_wallet_backend: sends.json unreadable ({e}); starting with none"),
-                Err(_) => {}
+            // The plain files from before they were sealed: dropped unread, not migrated.
+            for old in ["wallets.json", "sends.json"] {
+                let _ = std::fs::remove_file(dir.join(old));
             }
+            g.registry = Registry::new(Some(dir.join("wallets.sealed.json")));
+            // Sends survive a restart, each seed's once its key comes; open ones are reconciled with the core's previews.
+            g.sends = Sends::new(Some(dir.join("sends.sealed.json")));
+            g.sends.start_ids_above(now_secs() * 1000);
             g.dir = Some(dir);
         }
         // Nothing outbound here: the threads make every call, after the host has wired us.
         let mut threads = self.threads.lock().unwrap_or_else(|e| e.into_inner());
         let inner = self.inner.clone();
         threads.push(std::thread::spawn(move || reactor(inner)));
-        for name in ["walletStateChanged", "sourceAlert"] {
+        let (tx, rx) = std::sync::mpsc::channel();
+        lock(&self.inner).asks = Some(tx);
+        let inner = self.inner.clone();
+        threads.push(std::thread::spawn(move || keys_thread(inner, rx)));
+        for name in ["walletStateChanged", "sourceAlert", "walletsChanged", "wallets_changed", "wallets_locked"] {
             let inner = self.inner.clone();
             threads.push(std::thread::spawn(move || listen(name, inner)));
         }

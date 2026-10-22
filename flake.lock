@@ -5812,6 +5812,23 @@
         "type": "github"
       }
     },
+    "logos-signer-interface": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792700214,
+        "narHash": "sha256-uxmV73xoHZTWki8/E8dAd4ybbmxcluVym2GxuijzsYA=",
+        "owner": "logos-co",
+        "repo": "logos-signer-interface",
+        "rev": "eab22d1a990adfb973aa8669175e366d28cf0803",
+        "type": "github"
+      },
+      "original": {
+        "owner": "logos-co",
+        "repo": "logos-signer-interface",
+        "rev": "eab22d1a990adfb973aa8669175e366d28cf0803",
+        "type": "github"
+      }
+    },
     "logos-standalone-app": {
       "inputs": {
         "logos-cpp-sdk": "logos-cpp-sdk_2",
@@ -9600,7 +9617,8 @@
     },
     "root": {
       "inputs": {
-        "logos-module-builder": "logos-module-builder"
+        "logos-module-builder": "logos-module-builder",
+        "logos-signer-interface": "logos-signer-interface"
       }
     },
     "rust-overlay": {

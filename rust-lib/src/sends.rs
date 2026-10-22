@@ -1,12 +1,20 @@
 //! Sends from request to settlement, one open per wallet: preparing → awaiting_approval →
-//! committing → sent, or failed, cancelled, unknown. Unknown means it may have left.
+//! committing → sent, or failed, cancelled, unknown. Unknown means it may have left. Each seed's
+//! sends are kept in sends.sealed.json under this module's key for its "sends" data, read only
+//! while the seed is unlocked.
 
 use std::collections::{BTreeMap, HashSet};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use logos_signer_interface::sealed::SealedDocs;
+use logos_signer_interface::wallets::DataKey;
 use serde_json::{json, Value};
 
 use crate::amount::btc_of;
+
+/// What the send lists are called in their boxes.
+const NAME: &str = "bitcoin_wallet_backend sends";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -113,6 +121,7 @@ pub const WALLET_CLOSED: &str = "the wallet closed before the send was approved"
 pub const CORE_LOST: &str = "the wallet core stopped answering before the send was approved";
 pub const RESTARTED: &str = "the backend restarted and the wallet core no longer has this send; nothing went out; request it again";
 pub const MAY_HAVE_LEFT: &str = "the transaction may have left: rebroadcast it or replace it with a higher fee; never pay again from other coins while it could still confirm";
+pub const LOCKED: &str = "this wallet's sends aren't open here yet; try again in a moment";
 pub const ABANDONED: &str = "Abandoned: its coins are free to spend again. If the original transaction still confirms, a later send from those coins will fail; if a later send confirms first, it replaces the original.";
 
 /// What the glue does next for a send.
@@ -200,6 +209,8 @@ pub struct Send {
     pub requester: String,
     pub network: String,
     pub group: String,
+    /// The signer manager's wallet the send's wallet belongs to, whose key seals it.
+    pub seed: String,
     pub state: State,
     pub error: String,
     pub error_code: String,
@@ -237,11 +248,18 @@ pub struct Send {
 /// Final sends kept for list_sends; older ones are dropped.
 const KEEP_FINAL: usize = 100;
 
-#[derive(Default)]
 pub struct Sends {
     next: u64,
     map: BTreeMap<u64, Send>,
     dirty: bool,
+    /// Each seed's sends, sealed; in memory only for a backend without a directory.
+    docs: SealedDocs,
+}
+
+impl Default for Sends {
+    fn default() -> Self {
+        Sends { next: 0, map: BTreeMap::new(), dirty: false, docs: SealedDocs::in_memory(NAME) }
+    }
 }
 
 fn num(id: &str) -> Option<u64> {
@@ -249,6 +267,102 @@ fn num(id: &str) -> Option<u64> {
 }
 
 impl Sends {
+    /// The sends kept at `path`, each seed's sealed until its key comes ([`Sends::unlock`]).
+    pub fn new(path: Option<PathBuf>) -> Self {
+        let docs = match path {
+            Some(p) => crate::open_sealed(p, NAME),
+            None => SealedDocs::in_memory(NAME),
+        };
+        Sends { docs, ..Default::default() }
+    }
+
+    /// New ids start past `floor`. The backend passes the clock in thousandths of a second, so a
+    /// locked seed's sends, unread, can't share an id with a new one.
+    pub fn start_ids_above(&mut self, floor: u64) {
+        self.next = self.next.max(floor);
+    }
+
+    /// Sealed here and its key not given yet: its sends are neither read nor written.
+    pub fn is_locked(&self, seed: &str) -> bool {
+        self.docs.wanted(seed).is_some()
+    }
+
+    /// The seeds whose sends wait for a key, each with the generation they are sealed under, if
+    /// sealed yet: the keys to ask for.
+    pub fn closed(&self) -> Vec<(String, Option<u32>)> {
+        let mut seeds = self.docs.seeds();
+        seeds.extend(self.map.values().map(|s| s.seed.clone()));
+        seeds.sort();
+        seeds.dedup();
+        seeds.into_iter().filter(|s| !self.docs.is_open(s)).map(|s| (s.clone(), self.docs.wanted(&s))).collect()
+    }
+
+    /// The seeds whose sends can be read now.
+    pub fn readable_seeds(&self) -> Vec<String> {
+        self.docs.readable().into_iter().map(|(s, _)| s).collect()
+    }
+
+    /// A seed's key came: its sends load, sealed again under `current`. A send this instance holds
+    /// already is newer than its stored copy and stays; an open one loaded is reconciled.
+    pub fn unlock(&mut self, seed: &str, box_key: &DataKey, current: &DataKey) -> Result<(), String> {
+        self.docs.unlock(seed, box_key, current).map_err(|e| e.message)?;
+        let doc: Value = match self.docs.get(seed).filter(|b| !b.is_empty()) {
+            Some(b) => serde_json::from_slice(b).map_err(|e| format!("sends.sealed.json: {e}"))?,
+            None => Value::Null,
+        };
+        self.merge(&doc, Some(seed), Instant::now());
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Wallets were locked: every key goes. Sends in memory stay until [`Sends::drop_locked`].
+    pub fn lock(&mut self) {
+        self.docs.lock();
+    }
+
+    /// Open sends of seeds locked here that can still be withdrawn: none going out or withdrawn.
+    pub fn locked_waiting(&self) -> Vec<String> {
+        self.map
+            .values()
+            .filter(|s| !s.state.is_final() && s.state != State::Committing && !s.saw_broadcasting && s.withdrawal.is_none())
+            .filter(|s| self.is_locked(&s.seed))
+            .map(|s| s.id.clone())
+            .collect()
+    }
+
+    /// Forgets the settled sends of seeds locked here, but those a job still runs for. Their stored
+    /// copies come back once the seed unlocks. The number dropped.
+    pub fn drop_locked(&mut self, busy: &HashSet<String>) -> usize {
+        let gone: Vec<u64> = self.map.iter().filter(|(_, s)| s.state.is_final() && !busy.contains(&s.id) && self.is_locked(&s.seed)).map(|(k, _)| *k).collect();
+        for k in &gone {
+            self.map.remove(k);
+        }
+        gone.len()
+    }
+
+    /// Seals each seed's sends whose stored copy differs. A seed locked here is skipped: it is
+    /// written once its key comes. One whose key never came yet waits in memory.
+    pub fn save(&mut self) -> Result<(), String> {
+        let mut seeds: Vec<String> = self.map.values().map(|s| s.seed.clone()).collect();
+        seeds.extend(self.readable_seeds());
+        seeds.sort();
+        seeds.dedup();
+        seeds.retain(|s| !s.is_empty() && !self.is_locked(s));
+        for seed in &seeds {
+            let body = serde_json::to_vec(&self.doc(seed)).map_err(|e| e.to_string())?;
+            if self.docs.get(seed) != Some(body.as_slice()) {
+                self.docs.put(seed, body).map_err(|e| format!("sends.sealed.json: {}", e.message))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// One seed's sends, as its document holds them.
+    fn doc(&self, seed: &str) -> Value {
+        let sends: Vec<Value> = self.map.values().filter(|s| s.seed == seed).map(wire).collect();
+        json!({"version": 1, "sends": sends})
+    }
+
     pub fn get(&self, id: &str) -> Option<&Send> {
         self.map.get(&num(id)?)
     }
@@ -289,8 +403,16 @@ impl Sends {
         self.map.values().filter(|s| !s.state.is_final() && !s.attached).map(|s| s.id.clone()).collect()
     }
 
-    /// A new send in `preparing`; refused while the wallet has another open.
-    pub fn begin(&mut self, kind: Kind, requester: &str, network: &str, group: &str, request: Value, now: u64) -> Result<String, String> {
+    /// A new send in `preparing`; refused while the wallet has another open, or while its seed's
+    /// sends are sealed here, where one could be.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin(&mut self, kind: Kind, requester: &str, network: &str, group: &str, seed: &str, request: Value, now: u64) -> Result<String, String> {
+        if seed.is_empty() {
+            return Err("the wallet core names no seed for the open wallet".into());
+        }
+        if self.is_locked(seed) {
+            return Err(LOCKED.into());
+        }
         if let Some(open) = self.open_for(network, group) {
             return Err(format!("send {open} is still open: one send at a time per wallet"));
         }
@@ -306,6 +428,7 @@ impl Sends {
                 requester: requester.into(),
                 network: network.into(),
                 group: group.into(),
+                seed: seed.into(),
                 state: State::Preparing,
                 error: String::new(),
                 error_code: String::new(),
@@ -718,35 +841,33 @@ impl Sends {
         json!(rows)
     }
 
-    /// What sends.json holds: no receipt, key or password; the core's job ids stay in memory.
+    /// Every send as a seed's document holds it, with the id counter: no receipt, key or password;
+    /// the core's job ids stay in memory.
     pub fn to_json(&self) -> Value {
-        let sends: Vec<Value> = self
-            .map
-            .values()
-            .map(|s| {
-                json!({
-                    "id": s.id, "kind": s.kind.name(), "requester": s.requester, "network": s.network, "group": s.group,
-                    "state": s.state.name(), "error": s.error, "errorCode": s.error_code, "request": s.request,
-                    "preview": s.preview, "previewId": s.preview_id, "txid": s.txid, "approvalHandle": s.approval_handle,
-                    "approval": s.approval, "broadcast": s.broadcast, "via": s.via,
-                    "withdrawal": s.withdrawal.as_ref().map(Withdrawal::to_wire), "previewCancelled": s.preview_cancelled,
-                    "cancelError": s.cancel_error, "sawSettled": s.saw_settled, "sawBroadcasting": s.saw_broadcasting,
-                    "signStarted": s.sign_started, "abandoned": s.abandoned, "reconciled": s.reconciled, "createdAt": s.created_at,
-                    "updatedAt": s.updated_at, "rebroadcasts": s.rebroadcasts,
-                })
-            })
-            .collect();
+        let sends: Vec<Value> = self.map.values().map(wire).collect();
         json!({"version": 1, "next": self.next, "sends": sends})
     }
 
-    /// Sends from sends.json. An open one comes back unattached, to be reconciled with the core.
+    /// Sends as [`Sends::to_json`] wrote them. An open one comes back unattached, to be reconciled
+    /// with the core.
     pub fn load(v: &Value, now: Instant) -> Self {
         let mut out = Sends { next: v["next"].as_u64().unwrap_or(0), ..Default::default() };
+        out.merge(v, None, now);
+        out
+    }
+
+    /// Adds the sends of a document that this instance doesn't hold. With `seed`, it is that
+    /// seed's document; a send without a seed is dropped.
+    fn merge(&mut self, v: &Value, seed: Option<&str>, now: Instant) {
         let text = |s: &Value, k: &str| s[k].as_str().unwrap_or_default().to_string();
         for s in v["sends"].as_array().into_iter().flatten() {
             let (Some(n), Some(state)) = (num(s["id"].as_str().unwrap_or_default()), State::parse(s["state"].as_str().unwrap_or_default())) else { continue };
-            out.next = out.next.max(n);
-            out.map.insert(
+            let seed = seed.map(String::from).unwrap_or_else(|| text(s, "seed"));
+            if seed.is_empty() || self.map.contains_key(&n) {
+                continue;
+            }
+            self.next = self.next.max(n);
+            self.map.insert(
                 n,
                 Send {
                     id: text(s, "id"),
@@ -754,6 +875,7 @@ impl Sends {
                     requester: text(s, "requester"),
                     network: text(s, "network"),
                     group: text(s, "group"),
+                    seed,
                     state,
                     error: text(s, "error"),
                     error_code: text(s, "errorCode"),
@@ -785,7 +907,6 @@ impl Sends {
                 },
             );
         }
-        out
     }
 
     fn prune(&mut self) {
@@ -796,6 +917,20 @@ impl Sends {
             }
         }
     }
+}
+
+/// A send as its seed's document holds it.
+fn wire(s: &Send) -> Value {
+    json!({
+        "id": s.id, "kind": s.kind.name(), "requester": s.requester, "network": s.network, "group": s.group, "seed": s.seed,
+        "state": s.state.name(), "error": s.error, "errorCode": s.error_code, "request": s.request,
+        "preview": s.preview, "previewId": s.preview_id, "txid": s.txid, "approvalHandle": s.approval_handle,
+        "approval": s.approval, "broadcast": s.broadcast, "via": s.via,
+        "withdrawal": s.withdrawal.as_ref().map(Withdrawal::to_wire), "previewCancelled": s.preview_cancelled,
+        "cancelError": s.cancel_error, "sawSettled": s.saw_settled, "sawBroadcasting": s.saw_broadcasting,
+        "signStarted": s.sign_started, "abandoned": s.abandoned, "reconciled": s.reconciled, "createdAt": s.created_at,
+        "updatedAt": s.updated_at, "rebroadcasts": s.rebroadcasts,
+    })
 }
 
 fn opt(s: &str) -> Value {
@@ -912,7 +1047,7 @@ mod tests {
     }
 
     fn started(s: &mut Sends) -> String {
-        let id = s.begin(Kind::Send, "some_dapp", "regtest", "g_1", json!({}), 1).unwrap();
+        let id = s.begin(Kind::Send, "some_dapp", "regtest", "g_1", "seed_1", json!({}), 1).unwrap();
         s.set_build_job(&id, "b1");
         assert_eq!(s.built(&id, preview("p1")), Next::Sign("p1".into()));
         s.set_sign_job(&id, "b2");
@@ -932,13 +1067,13 @@ mod tests {
     #[test]
     fn one_open_send_per_wallet() {
         let mut s = Sends::default();
-        let a = s.begin(Kind::Send, "x", "regtest", "g_1", json!({}), 1).unwrap();
-        assert!(s.begin(Kind::Send, "y", "regtest", "g_1", json!({}), 1).unwrap_err().contains(&a));
-        assert!(s.begin(Kind::FeeBump, "y", "regtest", "g_1", json!({}), 1).is_err(), "a fee bump is a send too");
-        assert!(s.begin(Kind::Send, "y", "regtest", "g_2", json!({}), 1).is_ok(), "another wallet");
+        let a = s.begin(Kind::Send, "x", "regtest", "g_1", "seed_1", json!({}), 1).unwrap();
+        assert!(s.begin(Kind::Send, "y", "regtest", "g_1", "seed_1", json!({}), 1).unwrap_err().contains(&a));
+        assert!(s.begin(Kind::FeeBump, "y", "regtest", "g_1", "seed_1", json!({}), 1).is_err(), "a fee bump is a send too");
+        assert!(s.begin(Kind::Send, "y", "regtest", "g_2", "seed_1", json!({}), 1).is_ok(), "another wallet");
         s.not_started(&a, "no wallet is open", None);
         assert_eq!((s.get(&a).unwrap().state, s.get(&a).unwrap().error_code.as_str()), (State::Failed, "no_wallet"));
-        assert!(s.begin(Kind::Send, "y", "regtest", "g_1", json!({}), 1).is_ok(), "a final send frees the wallet");
+        assert!(s.begin(Kind::Send, "y", "regtest", "g_1", "seed_1", json!({}), 1).is_ok(), "a final send frees the wallet");
     }
 
     #[test]
@@ -1076,7 +1211,7 @@ mod tests {
         const DUST: &str = "The smallest amount this address can receive is 294 sats.";
         for code in [Some("dust"), None] {
             let mut s = Sends::default();
-            let id = s.begin(Kind::Send, "some_dapp", "regtest", "g_1", json!({}), 1).unwrap();
+            let id = s.begin(Kind::Send, "some_dapp", "regtest", "g_1", "seed_1", json!({}), 1).unwrap();
             s.set_build_job(&id, "b1");
             assert_eq!(s.build_failed(&id, DUST, code), Some(State::Failed));
             let st = s.status_json(&id);
@@ -1087,13 +1222,13 @@ mod tests {
     #[test]
     fn a_build_withdrawn_midway_is_cancelled_once_built() {
         let mut s = Sends::default();
-        let id = s.begin(Kind::Send, "some_dapp", "regtest", "g_1", json!({}), 1).unwrap();
+        let id = s.begin(Kind::Send, "some_dapp", "regtest", "g_1", "seed_1", json!({}), 1).unwrap();
         s.set_build_job(&id, "b1");
         assert_eq!(s.withdraw(&id, Withdrawal::Caller("some_dapp".into())), Ok(Next::CancelBuild("b1".into())));
         assert_eq!(s.built(&id, preview("p1")), Next::CancelPreview("p1".into()), "its inputs were locked: release them");
         assert_eq!(s.cancel_done(&id), Some(State::Cancelled));
         let mut s = Sends::default();
-        let id = s.begin(Kind::Send, "some_dapp", "regtest", "g_1", json!({}), 1).unwrap();
+        let id = s.begin(Kind::Send, "some_dapp", "regtest", "g_1", "seed_1", json!({}), 1).unwrap();
         s.set_build_job(&id, "b1");
         s.withdraw(&id, Withdrawal::WalletClosed).unwrap();
         assert_eq!(s.build_failed(&id, "cancelled", Some("cancelled")), Some(State::Failed));
@@ -1139,7 +1274,7 @@ mod tests {
     #[test]
     fn a_fee_bump_is_not_withdrawn_for_spending_the_send_it_replaces() {
         let mut s = Sends::default();
-        let id = s.begin(Kind::FeeBump, "bitcoin_wallet_ui", "regtest", "g_1", json!({"txid": "ab".repeat(32)}), 1).unwrap();
+        let id = s.begin(Kind::FeeBump, "bitcoin_wallet_ui", "regtest", "g_1", "seed_1", json!({"txid": "ab".repeat(32)}), 1).unwrap();
         s.set_build_job(&id, "b1");
         assert_eq!(s.built(&id, preview("p1")), Next::Sign("p1".into()));
         s.set_sign_job(&id, "b2");
@@ -1152,7 +1287,7 @@ mod tests {
         let mut s = Sends::default();
         let done = started(&mut s);
         s.signed(&done, &json!({"txid": "t1", "broadcast": "unknown", "via": "electrum-1"}));
-        let open = s.begin(Kind::Send, "some_dapp", "regtest", "g_2", json!({"recipients": []}), 5).unwrap();
+        let open = s.begin(Kind::Send, "some_dapp", "regtest", "g_2", "seed_1", json!({"recipients": []}), 5).unwrap();
         s.set_build_job(&open, "b9");
         s.built(&open, preview("p2"));
         s.set_sign_job(&open, "b10");
@@ -1160,7 +1295,7 @@ mod tests {
         assert!(s.take_dirty() && !s.take_dirty(), "dirty until taken");
         let text = s.to_json().to_string().to_lowercase();
         for word in ["receipt", "password", "phrase", "databasekey", "xprv", "tprv", "\"b10\"", "\"b9\""] {
-            assert!(!text.contains(word), "sends.json holds {word}");
+            assert!(!text.contains(word), "a send's document holds {word}");
         }
         let r = reloaded(&s);
         assert_eq!((r.get(&done).unwrap().state, r.get(&done).unwrap().attached), (State::Unknown, true));
@@ -1169,8 +1304,153 @@ mod tests {
         assert!(o.sign_job.is_none() && o.awaiting_since.is_some());
         assert_eq!(r.orphans(), vec![open.clone()]);
         let mut r = r;
-        let next = r.begin(Kind::Send, "x", "regtest", "g_3", json!({}), 9).unwrap();
+        let next = r.begin(Kind::Send, "x", "regtest", "g_3", "seed_1", json!({}), 9).unwrap();
         assert_eq!(next, "s3", "ids go on after a restart");
+    }
+
+    /// The sends kept at `p` as a restarted backend reads them, with these seeds' keys given.
+    fn reopened(p: &std::path::Path, keys: &[(&str, u8)]) -> Sends {
+        let mut s = Sends::new(Some(p.to_path_buf()));
+        for (seed, byte) in keys {
+            s.unlock(seed, &key(*byte, 0), &key(*byte, 0)).unwrap();
+        }
+        s
+    }
+
+    /// A send of `seed`'s wallet being signed.
+    fn paying(s: &mut Sends, seed: &str, group: &str) -> String {
+        let request = json!({"recipients": [{"address": "bcrt1qpay", "amountSat": "60000"}]});
+        let id = s.begin(Kind::Send, "some_dapp", "regtest", group, seed, request, 1).unwrap();
+        s.set_build_job(&id, "b1");
+        s.built(&id, preview("p1"));
+        s.set_sign_job(&id, "b2");
+        id
+    }
+
+    /// The box a seed's sends are sealed in, as the file holds it.
+    fn sealed(p: &std::path::Path, seed: &str) -> Value {
+        serde_json::from_str::<Value>(&std::fs::read_to_string(p).unwrap()).unwrap()["seeds"][seed].clone()
+    }
+
+    fn ids(s: &Sends) -> Vec<Value> {
+        s.list_json().as_array().unwrap().iter().map(|r| r["requestId"].clone()).collect()
+    }
+
+    use crate::test_key as key;
+
+    #[test]
+    fn a_locked_seeds_sends_are_neither_listed_nor_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sends.sealed.json");
+        let mut s = reopened(&p, &[("seed_1", 1), ("seed_2", 2)]);
+        let a = paying(&mut s, "seed_1", "g_1");
+        let b = paying(&mut s, "seed_2", "g_2");
+        s.signed(&a, &json!({"txid": "ab".repeat(32), "broadcast": "seen"}));
+        s.signed(&b, &json!({"txid": "cd".repeat(32), "broadcast": "seen"}));
+        s.save().unwrap();
+        // A restart with only seed_1's key: seed_2's sends aren't read, and none starts for it.
+        let mut r = reopened(&p, &[("seed_1", 1)]);
+        assert_eq!(ids(&r), vec![json!(a)]);
+        assert_eq!(r.status_json(&b)["ok"], false);
+        assert_eq!(r.begin(Kind::Send, "x", "regtest", "g_2", "seed_2", json!({}), 2).unwrap_err(), LOCKED);
+        assert_eq!(r.closed(), vec![("seed_2".to_string(), Some(0))]);
+        // Locked while a send of seed_2 is open: it keeps working in memory, unwritten.
+        let c = s.begin(Kind::Send, "some_dapp", "regtest", "g_2", "seed_2", json!({}), 3).unwrap();
+        s.set_build_job(&c, "b3");
+        s.save().unwrap();
+        let before = sealed(&p, "seed_2");
+        s.lock();
+        s.unlock("seed_1", &key(1, 0), &key(1, 0)).unwrap();
+        assert_eq!(s.readable_seeds(), vec!["seed_1".to_string()]);
+        assert_eq!(s.locked_waiting(), vec![c.clone()], "withdrawn as a close would");
+        assert_eq!(s.drop_locked(&HashSet::new()), 1, "the settled one goes at once");
+        assert_eq!(s.build_failed(&c, "the wallet closed", Some("no_wallet")), Some(State::Failed));
+        s.mark_dirty();
+        s.save().unwrap();
+        assert_eq!(sealed(&p, "seed_2"), before, "seed_2's sends are not written while it is locked");
+        let busy: HashSet<String> = [c.clone()].into();
+        assert_eq!(s.drop_locked(&busy), 0, "kept while a job runs for it");
+        assert_eq!(ids(&s), vec![json!(c), json!(a)]);
+        assert_eq!(s.drop_locked(&HashSet::new()), 1);
+        assert_eq!(ids(&s), vec![json!(a)]);
+        // Its key again: the copy stored before the lock comes back, to be reconciled.
+        s.unlock("seed_2", &key(2, 0), &key(2, 0)).unwrap();
+        assert_eq!((s.get(&c).unwrap().state, s.get(&b).unwrap().state), (State::Preparing, State::Sent));
+        assert_eq!(s.orphans(), vec![c]);
+    }
+
+    #[test]
+    fn a_send_before_its_seeds_key_waits_in_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sends.sealed.json");
+        let mut s = Sends::new(Some(p.clone()));
+        let a = paying(&mut s, "seed_3", "g_3");
+        s.save().unwrap();
+        assert!(!p.exists(), "nothing written before the key");
+        assert_eq!((ids(&s), s.closed()), (vec![json!(a)], vec![("seed_3".to_string(), None)]));
+        s.unlock("seed_3", &key(3, 0), &key(3, 0)).unwrap();
+        s.save().unwrap();
+        assert_eq!(reopened(&p, &[("seed_3", 3)]).get(&a).unwrap().seed, "seed_3");
+    }
+
+    #[test]
+    fn a_reopened_store_reads_only_with_its_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sends.sealed.json");
+        let mut s = reopened(&p, &[("seed_1", 1)]);
+        let a = paying(&mut s, "seed_1", "g_1");
+        s.save().unwrap();
+        let mut r = Sends::new(Some(p.clone()));
+        assert!(ids(&r).is_empty() && r.get(&a).is_none(), "sealed until the key comes");
+        assert!(r.unlock("seed_1", &key(2, 0), &key(2, 0)).is_err(), "another key");
+        assert!(r.get(&a).is_none());
+        r.unlock("seed_1", &key(1, 0), &key(1, 0)).unwrap();
+        let o = r.get(&a).unwrap();
+        assert_eq!((o.state, o.attached, o.seed.as_str()), (State::Preparing, false, "seed_1"));
+        assert_eq!(r.orphans(), vec![a]);
+    }
+
+    #[test]
+    fn the_sealed_file_names_no_wallet_address_amount_or_txid() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sends.sealed.json");
+        let mut s = reopened(&p, &[("seed_1", 1)]);
+        let a = paying(&mut s, "seed_1", "g_1");
+        s.observe(&a, "awaiting_approval", Some("smh_1"), Instant::now());
+        s.signed(&a, &json!({"txid": "ab".repeat(32), "broadcast": "seen", "via": "electrum-0"}));
+        s.save().unwrap();
+        let text = crate::clear_text_of(&p);
+        for word in ["g_1", "bcrt1q", "60000", "39859", "abab", "cdcd", "smh_1", "electrum", "some_dapp", "regtest", "txid", "receipt", "password"] {
+            assert!(!text.contains(word), "sends.sealed.json holds {word}: {text}");
+        }
+        assert!(text.contains("seed_1"), "only the seed names its box");
+    }
+
+    #[test]
+    fn a_generation_change_reseals_the_sends() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sends.sealed.json");
+        let mut s = reopened(&p, &[("seed_1", 1)]);
+        let a = paying(&mut s, "seed_1", "g_1");
+        s.save().unwrap();
+        let mut r = Sends::new(Some(p.clone()));
+        assert_eq!(r.closed(), vec![("seed_1".to_string(), Some(0))]);
+        r.unlock("seed_1", &key(1, 0), &key(7, 3)).unwrap();
+        assert!(r.get(&a).is_some());
+        let mut r = Sends::new(Some(p));
+        assert_eq!(r.closed(), vec![("seed_1".to_string(), Some(3))], "sealed under the current generation");
+        assert!(r.unlock("seed_1", &key(1, 0), &key(1, 0)).is_err(), "the old key no longer opens it");
+        r.unlock("seed_1", &key(7, 3), &key(7, 3)).unwrap();
+        assert!(r.get(&a).is_some());
+    }
+
+    #[test]
+    fn ids_start_above_the_floor() {
+        let mut s = Sends::default();
+        s.start_ids_above(5_000);
+        assert_eq!(s.begin(Kind::Send, "x", "regtest", "g_1", "seed_1", json!({}), 1).unwrap(), "s5001");
+        s.start_ids_above(10);
+        assert_eq!(s.begin(Kind::Send, "x", "regtest", "g_2", "seed_1", json!({}), 1).unwrap(), "s5002", "never back");
     }
 
     #[test]
@@ -1188,7 +1468,7 @@ mod tests {
         assert_eq!(r.reconcile(&id, g(Seen::Vouched), now).0, Some(State::Sent));
         // Built but nothing signs it: sign it again, once.
         let mut s2 = Sends::default();
-        let id2 = s2.begin(Kind::Send, "x", "regtest", "g_1", json!({}), 1).unwrap();
+        let id2 = s2.begin(Kind::Send, "x", "regtest", "g_1", "seed_1", json!({}), 1).unwrap();
         s2.built(&id2, preview("p9"));
         let mut r = reloaded(&s2);
         assert_eq!(r.reconcile(&id2, CoreView::Preview { state: "built", handle: None }, now), (None, Next::Sign("p9".into())));
@@ -1236,7 +1516,7 @@ mod tests {
         assert_eq!(r.reconcile(&id3, g(true, Some(Seen::Absent), true), now).0, Some(State::Unknown));
         // Lost mid-build.
         let mut s4 = Sends::default();
-        let id4 = s4.begin(Kind::Send, "x", "regtest", "g_1", json!({}), 1).unwrap();
+        let id4 = s4.begin(Kind::Send, "x", "regtest", "g_1", "seed_1", json!({}), 1).unwrap();
         let mut r = reloaded(&s4);
         assert_eq!(r.reconcile(&id4, g(true, Some(Seen::Absent), true), now).0, Some(State::Failed));
         // A cancel the restart interrupted is asked again, once.
@@ -1376,7 +1656,7 @@ mod tests {
         let mut s = Sends::default();
         let id = started(&mut s);
         s.signed(&id, &json!({"txid": ab, "broadcast": "unknown"}));
-        let again = s.begin(Kind::Send, "x", "regtest", "g_1", json!({}), 2).unwrap();
+        let again = s.begin(Kind::Send, "x", "regtest", "g_1", "seed_1", json!({}), 2).unwrap();
         s.built(&again, preview("p2"));
         assert!(s.unsettled("regtest", "g_1").is_empty(), "the newer send follows that transaction");
     }
@@ -1393,7 +1673,7 @@ mod tests {
     fn listing_is_newest_first_and_bounded() {
         let mut s = Sends::default();
         for i in 0..(KEEP_FINAL + 5) {
-            let id = s.begin(Kind::Send, "x", "regtest", "g_1", json!({}), i as u64).unwrap();
+            let id = s.begin(Kind::Send, "x", "regtest", "g_1", "seed_1", json!({}), i as u64).unwrap();
             s.not_started(&id, "no", None);
         }
         let list = s.list_json();
