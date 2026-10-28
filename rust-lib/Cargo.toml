@@ -17,7 +17,7 @@ crate-type = ["staticlib", "rlib"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # logos.wallets/1: the sealed per-seed documents, under this module's keys from the signer manager.
-logos-signer-interface = { git = "https://github.com/logos-co/logos-signer-interface", rev = "eab22d1a990adfb973aa8669175e366d28cf0803" }
+logos-signer-interface = { git = "https://github.com/logos-co/logos-signer-interface", rev = "d8cfff84327c9b2b5cdb9702d1c4217cad567cee" }
 
 # Provided by logos-module-builder at build time (staged into ../logos-rust-sdk-src).
 logos-rust-sdk = { path = "../logos-rust-sdk-src", optional = true }

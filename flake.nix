@@ -7,7 +7,7 @@
     # contracts/, named by dependency_overrides in metadata.json.
     # logos.wallets/1 (wallets.lidl): this module's keys from the signer manager, bound at runtime.
     logos-signer-interface = {
-      url = "github:logos-co/logos-signer-interface/eab22d1a990adfb973aa8669175e366d28cf0803";
+      url = "github:logos-co/logos-signer-interface/d8cfff84327c9b2b5cdb9702d1c4217cad567cee";
       flake = false;
     };
   };
