@@ -28,4 +28,5 @@ module bitcoin_wallet_core_module {
   event walletStateChanged(payload: tstr) description "status()'s shape, when what it says changes."
   event jobFinished(job_id: tstr, state: tstr)
   event sourceAlert(payload: tstr) description "`{ source, kind: suspect|stale|authority_behind|anchor_mismatch|authority_suspect, detail, at }`."
+  event walletsChanged(locked: int) description "`list_wallets` shows other wallets: one was unlocked or locked in the Signer app. `locked`\ncounts the seeds whose wallets it can't list."
 }

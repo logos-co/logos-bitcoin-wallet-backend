@@ -24,6 +24,37 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
     std::fs::rename(tmp, path)
 }
 
+/// The per-seed sealed documents kept at `path`, all locked until their keys come. A file that
+/// doesn't read is set aside as `.unreadable` and the store starts empty.
+pub fn open_sealed(path: std::path::PathBuf, name: &str) -> logos_signer_interface::sealed::SealedDocs {
+    use logos_signer_interface::sealed::SealedDocs;
+    SealedDocs::load(&path, name).unwrap_or_else(|e| {
+        eprintln!("bitcoin_wallet_backend: {} unreadable ({}); set aside", path.display(), e.message);
+        let _ = std::fs::rename(&path, path.with_extension("json.unreadable"));
+        SealedDocs::load(&path, name).unwrap_or_else(|_| SealedDocs::in_memory(name))
+    })
+}
+
+/// A data key as the signer manager would give one, for the tests.
+#[cfg(test)]
+pub(crate) fn test_key(byte: u8, generation: u32) -> logos_signer_interface::wallets::DataKey {
+    logos_signer_interface::wallets::DataKey { key: logos_signer_interface::Secret::new(format!("{byte:02x}").repeat(32)), generation }
+}
+
+/// A sealed file's text with each box's ciphertext blanked, for the tests: what it says in the clear.
+/// Hex ciphertext could hold any digits by chance; what is left must hold nothing of the wallet's.
+#[cfg(test)]
+pub(crate) fn clear_text_of(path: &std::path::Path) -> String {
+    let mut file: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    for b in file["seeds"].as_object_mut().unwrap().values_mut() {
+        let mut inner: serde_json::Value = serde_json::from_str(b.as_str().unwrap()).unwrap();
+        assert!(inner["box"].as_str().unwrap().chars().all(|c| c.is_ascii_hexdigit()), "a box is hex");
+        inner["box"] = serde_json::json!("");
+        *b = serde_json::json!(inner.to_string());
+    }
+    file.to_string().to_lowercase()
+}
+
 /// No method takes a secret: no parameter or accepted field may be named like one.
 #[cfg(test)]
 mod contract {
@@ -54,7 +85,7 @@ mod contract {
     fn no_parameter_or_field_is_named_like_a_secret() {
         let methods = trait_methods(GLUE, "BitcoinWalletBackendModule:");
         let events = trait_methods(GLUE, "BitcoinWalletBackendModuleEvents");
-        assert!(methods.len() >= 30 && events.len() == 6, "found {} methods, {} events", methods.len(), events.len());
+        assert!(methods.len() >= 30 && events.len() == 7, "found {} methods, {} events", methods.len(), events.len());
         for (m, params) in methods.iter().chain(&events) {
             for p in params {
                 assert_eq!(banned(p), None, "{m}({p}) is named like a secret");

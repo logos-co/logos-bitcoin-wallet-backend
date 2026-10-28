@@ -241,8 +241,9 @@ mod tests {
     #[test]
     fn status_gains_percent_label_and_the_open_send() {
         let e = WalletEntry { label: "Savings".into(), ..Default::default() };
-        let v = status_view(json!({"state": "ready", "authority": {"height": 10}, "walletTip": 10}), "signet", Some(&e), Some("s3"));
+        let v = status_view(json!({"state": "ready", "seed": "seed_1", "authority": {"height": 10}, "walletTip": 10}), "signet", Some(&e), Some("s3"));
         assert_eq!((v["syncPercent"].clone(), v["label"].clone(), v["openSend"].clone()), (json!(100), json!("Savings"), json!("s3")));
+        assert_eq!(v["seed"], "seed_1", "the core's seed passes through");
         let v = status_view(json!({"state": "no_wallet", "authority": {"height": null}}), "signet", None, None);
         assert!(v.get("syncPercent").is_none());
     }

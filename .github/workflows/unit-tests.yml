@@ -49,7 +49,7 @@ jobs:
 
       - name: The guard tests must be present
         # A suite that silently stops compiling reads as coverage. These hold the role gate,
-        # the send states, the amounts and the no-secrets contract.
+        # the send states, the amounts, the no-secrets contract and the sealed files.
         shell: bash
         run: |
           set -euo pipefail
@@ -73,6 +73,12 @@ jobs:
                    absent_heights_are_no_percentage \
                    an_offer_nobody_acknowledges_is_withdrawn_after_the_window \
                    parse_refuses_precision_loss_and_odd_spellings \
-                   format_is_exact_to_eight_places; do
+                   format_is_exact_to_eight_places \
+                   round_trips_and_never_holds_a_secret \
+                   a_locked_seeds_wallets_are_neither_listed_nor_written \
+                   a_locked_seeds_sends_are_neither_listed_nor_written \
+                   a_reopened_store_reads_only_with_its_key \
+                   the_sealed_file_names_no_wallet_address_amount_or_txid \
+                   a_generation_change_reseals; do
             echo "$out" | grep -q "$t" || { echo "::error::missing guard test: $t"; exit 1; }
           done

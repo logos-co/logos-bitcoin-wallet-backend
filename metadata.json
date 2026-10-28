@@ -6,10 +6,13 @@
   "interface": "cdylib",
   "concurrency": "multi",
   "category": "wallet",
-  "description": "Bitcoin wallet coordinator: custodian roles, the wallet registry, the wallet core's jobs under backend ids, sends from request to settlement, and the node module's source settings. Holds no key material and takes no password.",
+  "description": "Bitcoin wallet coordinator: custodian roles, the wallet registry, the wallet core's jobs under backend ids, sends from request to settlement, and the node module's source settings. Holds no wallet key material and takes no password, and seals its files per seed under its own keys from signer_manager_module.",
   "author": "Logos Core Team",
   "main": "bitcoin_wallet_backend_plugin",
   "dependencies": ["bitcoin_wallet_core_module", "bitcoin_node_module"],
+  "interface_dependencies": [
+    { "name": "wallets", "input": "logos-signer-interface", "file": "wallets.lidl" }
+  ],
   "dependency_overrides": {
     "bitcoin_wallet_core_module": { "file": "contracts/bitcoin_wallet_core_module.lidl" },
     "bitcoin_node_module": { "file": "contracts/bitcoin_node_module.lidl" }

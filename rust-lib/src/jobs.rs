@@ -102,6 +102,11 @@ impl Jobs {
         self.map.iter().filter(|(_, j)| !j.finished()).map(|(k, j)| (k.clone(), j.core_id.clone(), j.receipt.clone())).collect()
     }
 
+    /// The sends a job still queued or running is for.
+    pub fn requests_in_flight(&self) -> std::collections::HashSet<String> {
+        self.map.values().filter(|j| !j.finished()).filter_map(|j| j.purpose.request().map(String::from)).collect()
+    }
+
     /// The network of an open still running, or of a close.
     pub fn lifecycle_pending(&self) -> Option<String> {
         self.map.values().filter(|j| !j.finished()).find_map(|j| match &j.purpose {
