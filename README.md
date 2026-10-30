@@ -160,6 +160,9 @@ network.
 
 ## Sources
 
+`set_proxy` takes `tor`, the Tor that comes with Logos and the node module's default, or a
+`socks5h://host:port` Tor of the person's own; `source_health` passes the node module's `tor`
+through (the built-in Tor's `{ state, progress, detail, socks }`, null for one's own).
 `sources`, `source_health` and `probe({ network?, source })` pass the node module's rows through:
 `certSha256`, `certificate { certSha256, subject, issuer, notBefore, notAfter, trusted }`, `encrypted`
 and `userAdded`. `set_source` and `set_sources` take `certSha256` to pin a TLS server's certificate,

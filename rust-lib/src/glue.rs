@@ -87,7 +87,8 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
 
     /// The node module's sources for the wallet's network.
     fn sources(&self) -> String;
-    /// The node module's source health, plus `wallet`, the open wallet's own view of them.
+    /// The node module's source health (with `tor`, the built-in Tor's state while it is the
+    /// proxy), plus `wallet`, the open wallet's own view of them.
     fn source_health(&self) -> String;
     /// `{ network?, source }`: the node module probes that source now, or every enabled server for "",
     /// within 15 s; a TLS server's row carries `certificate`.
@@ -98,7 +99,8 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     fn set_sources(&self, list_json: String) -> String;
     /// CUSTODIAN. `{ use?, history?, tor? }` for one source. Refused while a wallet is open.
     fn set_source(&self, source_id: String, changes_json: String) -> String;
-    /// CUSTODIAN. The Tor proxy for every source, socks5h://host:port. Refused while a wallet is open.
+    /// CUSTODIAN. The Tor proxy for every source: `tor` (the Tor that comes with Logos, the
+    /// default) or socks5h://host:port. Refused while a wallet is open.
     fn set_proxy(&self, proxy: String) -> String;
     /// CUSTODIAN. Clears a suspect mark in the node module and, with a wallet open, in the core.
     fn clear_suspect(&self, source_id: String) -> String;
