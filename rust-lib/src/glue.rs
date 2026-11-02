@@ -85,10 +85,11 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     /// BTC as satoshis, exactly; more than 8 decimals is refused. `{ ok, btc, sat }`.
     fn parse_btc(&self, btc: String) -> String;
 
-    /// The node module's sources for the wallet's network.
+    /// The node module's sources for the wallet's network, with `torUse` and `torUseChosen`.
     fn sources(&self) -> String;
     /// The node module's source health (with `tor`, the built-in Tor's state while it is the
-    /// proxy), plus `wallet`, the open wallet's own view of them.
+    /// proxy and Tor is used, and `torUse`, `torUseChosen`), plus `wallet`, the open wallet's own
+    /// view of them.
     fn source_health(&self) -> String;
     /// `{ network?, source }`: the node module probes that source now, or every enabled server for "",
     /// within 15 s; a TLS server's row carries `certificate`.
@@ -102,6 +103,9 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     /// CUSTODIAN. The Tor proxy for every source: `tor` (the Tor that comes with Logos, the
     /// default) or socks5h://host:port. Refused while a wallet is open.
     fn set_proxy(&self, proxy: String) -> String;
+    /// CUSTODIAN. What Tor carries: `all`, `identifying` or `none`, for every network; it sets
+    /// `torUseChosen`. `{ ok, torUse, torUseChosen }`. Refused while a wallet is open.
+    fn set_tor_use(&self, mode: String) -> String;
     /// CUSTODIAN. Clears a suspect mark in the node module and, with a wallet open, in the core.
     fn clear_suspect(&self, source_id: String) -> String;
     /// CUSTODIAN. `{ network, peers: [host[:port]] }`, at most 64: Kyoto's own peers, which replace the
@@ -1407,6 +1411,16 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
         }
         match self.settings_unlocked() {
             Ok(_) => relay(ipc!(node(), set_proxy_async_with_timeout, WRITE, &proxy), "bitcoin_node_module"),
+            Err(e) => err(e),
+        }
+    }
+
+    fn set_tor_use(&self, mode: String) -> String {
+        if !self.custodian("set_tor_use", &caller()) {
+            return refused();
+        }
+        match self.settings_unlocked() {
+            Ok(_) => relay(ipc!(node(), set_tor_use_async_with_timeout, WRITE, &mode), "bitcoin_node_module"),
             Err(e) => err(e),
         }
     }

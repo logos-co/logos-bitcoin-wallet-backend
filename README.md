@@ -15,7 +15,7 @@ One role, the custodian set, defaults to `bitcoin_wallet_ui`. There is no approv
 
 | Who | Methods |
 |---|---|
-| custodian | `configure`, `set_active_network`, `open_wallet`, `close_wallet`, `descriptors`, `set_birthday`, `set_gap_limit`, `set_sources`, `set_source`, `set_proxy`, `set_own_peers`, `peer_list`, `clear_suspect`, `rebroadcast`, `abandon_send` |
+| custodian | `configure`, `set_active_network`, `open_wallet`, `close_wallet`, `descriptors`, `set_birthday`, `set_gap_limit`, `set_sources`, `set_source`, `set_proxy`, `set_tor_use`, `set_own_peers`, `peer_list`, `clear_suspect`, `rebroadcast`, `abandon_send` |
 | any named module | `request_send`, `request_fee_bump`, and `cancel_send` for its own request |
 | anyone | every read: `caller_identity`, `list_networks`, `list_wallets`, `job_status`, `wallet_status`, `balances`, `history`, `receive_address`, `current_address`, `fee_rates`, `address_valid`, `format_btc`, `parse_btc`, `sources`, `source_health`, `probe`, `exposure`, `send_status`, `list_sends` |
 
@@ -68,8 +68,8 @@ addresses. A send that spends them carries the core's `beyond_gap_inputs` warnin
 
 From the moment an open starts until the wallet closes, the backend tells the node module
 (`set_wallet_open`), which then refuses source changes on that network. It checks the node
-module every 9 s and says so again after a restart. `set_sources`, `set_source` and
-`set_proxy` are refused here too while a wallet is open. `clear_suspect` is not: the core
+module every 9 s and says so again after a restart. `set_sources`, `set_source`, `set_proxy`
+and `set_tor_use` are refused here too while a wallet is open. `clear_suspect` is not: the core
 marks a source suspect while it syncs, so the mark is cleared in the node module and, with a
 wallet open, in the core.
 
@@ -162,7 +162,11 @@ network.
 
 `set_proxy` takes `tor`, the Tor that comes with Logos and the node module's default, or a
 `socks5h://host:port` Tor of the person's own; `source_health` passes the node module's `tor`
-through (the built-in Tor's `{ state, progress, detail, socks, answered }`, null for one's own).
+through (the built-in Tor's `{ state, progress, detail, socks, answered }`, null for one's own
+and in `none`). `set_tor_use(mode)` relays what Tor carries, for every network: `all`,
+`identifying` (Kyoto's headers and filters direct, matched blocks and sends over Tor) or `none`;
+it answers `{ ok, torUse, torUseChosen }`, and `sources` and `source_health` carry both, so the
+app asks once, before the first account, while `torUseChosen` is false.
 `sources`, `source_health` and `probe({ network?, source })` pass the node module's rows through:
 `certSha256`, `certificate { certSha256, subject, issuer, notBefore, notAfter, trusted }`, `encrypted`
 and `userAdded`. `set_source` and `set_sources` take `certSha256` to pin a TLS server's certificate,

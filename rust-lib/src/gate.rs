@@ -141,6 +141,7 @@ pub const CUSTODIAN_METHODS: &[&str] = &[
     "set_sources",
     "set_source",
     "set_proxy",
+    "set_tor_use",
     "clear_suspect",
     "rebroadcast",
     "abandon_send",
