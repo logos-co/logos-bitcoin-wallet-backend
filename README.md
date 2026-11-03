@@ -194,7 +194,8 @@ amounts, never zero. `receive_address` is the core's `next_address`: a fresh add
 `unused` unused addresses reach the gap limit, the first of them with `fresh` false.
 `current_address` is the first unused one, revealed only when none is: what the app shows when a
 wallet opens. `fee_rates` is an estimate (`estimated`, with the `sources` it came from), or `{ ok:
-false, error: "no fee estimate yet" }`, never the floor in its place. `format_btc` and `parse_btc` are exact; more than eight decimals is
+false, error: "no fee estimate yet" }`, never the floor in its place. Signet, which runs without a
+fee server, is the exception: there the core answers the relay floor, as `basis: floor`. `format_btc` and `parse_btc` are exact; more than eight decimals is
 refused. Long operations answer a backend job id (`job_status`); the core's receipts never
 leave this module. Events: `wallet_state_changed`, `sync_progress`, `balance_changed`,
 `send_status_changed`, `job_finished`, `source_alert`, `wallets_changed`.
@@ -208,8 +209,8 @@ Networks: `mainnet`, `testnet4`, `signet`, and `regtest` when the persistence di
 The wallet core's and the node module's contracts are committed under `contracts/` and named
 by `dependency_overrides` in `metadata.json`, so the module builds without their sources.
 Regenerate them from each module's `glue.rs` with `logos-lidl-gen --from-rust` when either
-changes. The core's is generated from its glue at e484096 (`feat/data-unlock`,
-logos-co/logos-bitcoin-wallet-core-module#17). The signer manager is reached through
+changes. Both are generated from the glue of logos-co/logos-bitcoin-node-module#5 and
+logos-co/logos-bitcoin-wallet-core-module#26. The signer manager is reached through
 `wallets.lidl` of logos-signer-interface, the `logos-signer-interface` flake input, named by
 `interface_dependencies` and bound to `signer_manager_module` at runtime.
 

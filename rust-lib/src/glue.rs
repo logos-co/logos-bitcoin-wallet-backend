@@ -74,8 +74,8 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     fn receive_address(&self) -> String;
     /// `{ ok, address, index }`: the first unused receive address, revealed only when none is.
     fn current_address(&self) -> String;
-    /// `{ ok, fast, normal, slow, minimum, sources, estimated }` in sat/vB, or `{ ok: false, error }` until
-    /// every level has an estimate.
+    /// `{ ok, fast, normal, slow, minimum, sources, estimated, basis }` in sat/vB, or `{ ok: false, error }`
+    /// until every level has an estimate. On signet, where nothing estimates, `basis: floor`.
     fn fee_rates(&self) -> String;
     /// An address or BIP21 URI on the wallet's network: `{ ok, valid, address, type, dustSat, amountSat?, reason? }`;
     /// `dustSat` is the least it can receive, below which a send fails with errorCode `dust`.
