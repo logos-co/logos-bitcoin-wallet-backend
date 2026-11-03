@@ -101,7 +101,7 @@ wallet open, in the core.
   (custodian, `unknown` only) has the core free its coins and marks the send `abandoned`: if the
   original still confirms, a later send from those coins fails, or replaces it if it confirms first.
 - A failed or cancelled send carries `errorCode`: the core's `rejected`, `expired`, `cancelled`,
-  `insufficient_funds`, `dust`, `no_route`, `busy`, `refused`, `no_wallet`, `signer_unavailable`,
+  `insufficient_funds`, `dust`, `no_route`, `not_sent`, `busy`, `refused`, `no_wallet`, `signer_unavailable`,
   `invalid` or `failed`, or the backend's `coins_changed`, `core_lost` or `backend_restarted`. A
   core that sends no code is read by its error text. `dust` is an amount below the recipient's
   dust limit, which `address_valid` gives as `dustSat`.
