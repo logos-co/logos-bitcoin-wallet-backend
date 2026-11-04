@@ -74,6 +74,13 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     fn receive_address(&self) -> String;
     /// `{ ok, address, index }`: the first unused receive address, revealed only when none is.
     fn current_address(&self) -> String;
+    /// CUSTODIAN. The open wallet's revealed receive addresses, by index: `{ ok, addresses: [{ index, address,
+    /// used, receivedSat, receivedBtc, label }], unused, gapLimit }`; `unused` counts the rows not used, as
+    /// receive_address does; change addresses are never listed. `{ ok, busy }` while the core is busy.
+    fn receive_addresses(&self) -> String;
+    /// CUSTODIAN. `{ index, label }` for a revealed receive address: at most 64 characters, trimmed, "" removes
+    /// it; the core keeps it in the wallet's encrypted database. `{ ok, index, label }`.
+    fn set_address_label(&self, params_json: String) -> String;
     /// `{ ok, fast, normal, slow, minimum, sources, estimated, basis }` in sat/vB, or `{ ok: false, error }`
     /// until every level has an estimate. On signet, where nothing estimates, `basis: floor`.
     fn fee_rates(&self) -> String;
@@ -1327,6 +1334,32 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
 
     fn current_address(&self) -> String {
         relay(ipc!(core(), current_address_async_with_timeout, READ), "the wallet core")
+    }
+
+    fn receive_addresses(&self) -> String {
+        if !self.custodian("receive_addresses", &caller()) {
+            return refused();
+        }
+        match ipc!(core(), addresses_async_with_timeout, READ).and_then(|s| parse(s, "wallet core")) {
+            Ok(v) if v["ok"] == true && v["busy"] != true => {
+                // The core's gap limit when its status answers; else the app has it from wallet_status.
+                let gap = core_status().ok().and_then(|s| s["gapLimit"].as_u64());
+                view::addresses_view(v, gap).to_string()
+            }
+            Ok(v) => v.to_string(),
+            Err(e) => err(format!("the wallet core did not answer: {e}")),
+        }
+    }
+
+    fn set_address_label(&self, params_json: String) -> String {
+        if !self.custodian("set_address_label", &caller()) {
+            return refused();
+        }
+        let (index, label) = match request::parse_address_label(&params_json) {
+            Ok(p) => p,
+            Err(e) => return coded("invalid", e),
+        };
+        relay(ipc!(core(), set_address_label_async_with_timeout, WRITE, index, &label), "the wallet core")
     }
 
     fn fee_rates(&self) -> String {

@@ -18,6 +18,7 @@ pub const BUMP_FIELDS: &[&str] = &["txid", "feeRate"];
 pub const ABANDON_FIELDS: &[&str] = &["txid"];
 pub const BIRTHDAY_FIELDS: &[&str] = &["date", "height"];
 pub const GAP_FIELDS: &[&str] = &["gapLimit"];
+pub const LABEL_FIELDS: &[&str] = &["index", "label"];
 /// Unused addresses the wallet core watches past the last used one, per keychain.
 pub const MIN_GAP_LIMIT: u64 = 20;
 pub const MAX_GAP_LIMIT: u64 = 1000;
@@ -283,6 +284,18 @@ pub fn parse_gap_limit(text: &str) -> Result<Value, String> {
     Ok(json!({"gapLimit": g}))
 }
 
+/// `{ index, label }`, the core's `set_address_label` arguments; the core trims and checks the label.
+pub fn parse_address_label(text: &str) -> Result<(i64, String), String> {
+    let v = doc(text, "set_address_label")?;
+    let o = object(&v, LABEL_FIELDS, "set_address_label")?;
+    let index = match o.get("index") {
+        None => return Err("index is required".into()),
+        Some(i) => i.as_u64().filter(|i| *i <= u64::from(u32::MAX)).ok_or("index must be a receive address's index, a whole number")?,
+    };
+    let Some(Value::String(label)) = o.get("label") else { return Err("label must be a string; \"\" removes it".into()) };
+    Ok((index as i64, label.clone()))
+}
+
 /// `{ network?, source }`: one source, or every enabled server when `source` is empty.
 pub fn parse_probe(text: &str, regtest: bool) -> Result<(Option<String>, String), String> {
     let v = doc(text, "probe")?;
@@ -402,6 +415,17 @@ mod tests {
         }
         assert!(parse_gap_limit("{}").unwrap_err().contains("required"));
         assert!(parse_gap_limit(r#"{"gapLimit":50,"rescan":true}"#).is_err(), "unknown fields");
+    }
+
+    #[test]
+    fn an_address_label_names_a_receive_index() {
+        assert_eq!(parse_address_label(r#"{"index":3,"label":" Rent "}"#).unwrap(), (3, " Rent ".to_string()), "the core trims");
+        assert_eq!(parse_address_label(r#"{"index":0,"label":""}"#).unwrap(), (0, String::new()), "\"\" removes it");
+        assert!(parse_address_label(r#"{"label":"x"}"#).unwrap_err().contains("required"));
+        for bad in [r#"{"index":-1,"label":"x"}"#, r#"{"index":1.5,"label":"x"}"#, r#"{"index":"1","label":"x"}"#, r#"{"index":4294967296,"label":"x"}"#,
+                    r#"{"index":1}"#, r#"{"index":1,"label":null}"#, r#"{"index":1,"label":7}"#, r#"{"index":1,"label":"x","note":"y"}"#, "[]", "{"] {
+            assert!(parse_address_label(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -15,7 +15,7 @@ One role, the custodian set, defaults to `bitcoin_wallet_ui`. There is no approv
 
 | Who | Methods |
 |---|---|
-| custodian | `configure`, `set_active_network`, `open_wallet`, `close_wallet`, `descriptors`, `set_birthday`, `set_gap_limit`, `set_sources`, `set_source`, `set_proxy`, `set_tor_use`, `set_own_peers`, `peer_list`, `clear_suspect`, `rebroadcast`, `abandon_send` |
+| custodian | `configure`, `set_active_network`, `open_wallet`, `close_wallet`, `descriptors`, `set_birthday`, `set_gap_limit`, `receive_addresses`, `set_address_label`, `set_sources`, `set_source`, `set_proxy`, `set_tor_use`, `set_own_peers`, `peer_list`, `clear_suspect`, `rebroadcast`, `abandon_send` |
 | any named module | `request_send`, `request_fee_bump`, and `cancel_send` for its own request |
 | anyone | every read: `caller_identity`, `list_networks`, `list_wallets`, `job_status`, `wallet_status`, `balances`, `history`, `receive_address`, `current_address`, `fee_rates`, `address_valid`, `format_btc`, `parse_btc`, `sources`, `source_health`, `probe`, `exposure`, `send_status`, `list_sends` |
 
@@ -193,7 +193,14 @@ state on history rows; `authority_suspect` and `unchecked_anchor` alerts. `balan
 amounts, never zero. `receive_address` is the core's `next_address`: a fresh address, or, once
 `unused` unused addresses reach the gap limit, the first of them with `fresh` false.
 `current_address` is the first unused one, revealed only when none is: what the app shows when a
-wallet opens. `fee_rates` is an estimate (`estimated`, with the `sources` it came from), or `{ ok:
+wallet opens. `receive_addresses` (custodian: the labels are the person's notes) lists the core's
+revealed receive addresses by index, `{ index, address, used, receivedSat, receivedBtc, label }`,
+never a change address, with `unused` (the rows not used, as `receive_address` counts them) and the
+core's `gapLimit` when its status answers; a busy core answers `{ ok, busy }`.
+`set_address_label({ index, label })` (custodian) has the core keep a label for a revealed receive
+address in the wallet's encrypted database: trimmed, at most 64 characters, `""` removes it; a
+malformed request is refused with code `invalid`, and the core's own refusals pass through, such as
+`no receive address #N yet`. `fee_rates` is an estimate (`estimated`, with the `sources` it came from), or `{ ok:
 false, error: "no fee estimate yet" }`, never the floor in its place. Signet, which runs without a
 fee server, is the exception: there the core answers the relay floor, as `basis: floor`. `format_btc` and `parse_btc` are exact; more than eight decimals is
 refused. Long operations answer a backend job id (`job_status`); the core's receipts never
