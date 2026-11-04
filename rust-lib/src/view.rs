@@ -91,6 +91,22 @@ pub fn balance_digest(b: &Value) -> Option<String> {
     Some(json!([b["confirmed"], b["waiting"], b["unchecked"], b["pending"], b["sent"], b["immature"], b["tooSmall"], b["beyondGap"]]).to_string())
 }
 
+/// The core's receive addresses, each with a `receivedBtc` twin, how many are unused, and the gap limit.
+pub fn addresses_view(mut a: Value, gap_limit: Option<u64>) -> Value {
+    let mut unused = 0u64;
+    if let Some(rows) = a["addresses"].as_array_mut() {
+        for r in rows {
+            r["receivedBtc"] = json!(btc_of(r["receivedSat"].as_str().unwrap_or_default()));
+            unused += u64::from(r["used"] != true);
+        }
+    }
+    a["unused"] = json!(unused);
+    if let Some(g) = gap_limit {
+        a["gapLimit"] = json!(g);
+    }
+    a
+}
+
 pub fn history_view(mut h: Value) -> Value {
     if let Some(rows) = h["rows"].as_array_mut() {
         for r in rows {
@@ -236,6 +252,20 @@ mod tests {
         assert_eq!(h["rows"][0]["amountBtc"], "0.00060000");
         assert_eq!(h["rows"][0]["feeBtc"], "0.00000141");
         assert_eq!(h["rows"][1]["feeBtc"], "", "a fee the core couldn't compute stays empty");
+    }
+
+    #[test]
+    fn receive_addresses_gain_their_twin_and_the_unused_count() {
+        let core = json!({"ok": true, "addresses": [
+            {"index": 0, "address": "bcrt1qa", "used": true, "receivedSat": "125000", "label": "Rent"},
+            {"index": 1, "address": "bcrt1qb", "used": false, "receivedSat": "0", "label": ""},
+            {"index": 2, "address": "bcrt1qc", "used": false, "receivedSat": "0", "label": ""}]});
+        let v = addresses_view(core.clone(), Some(20));
+        assert_eq!((v["unused"].clone(), v["gapLimit"].clone()), (json!(2), json!(20)));
+        assert_eq!((v["addresses"][0]["receivedBtc"].clone(), v["addresses"][1]["receivedBtc"].clone()), (json!("0.00125000"), json!("0.00000000")));
+        assert_eq!((v["addresses"][0]["label"].clone(), v["addresses"][0]["used"].clone()), (json!("Rent"), json!(true)), "passed through");
+        assert!(addresses_view(core, None).get("gapLimit").is_none(), "no status, no gap limit: the app has wallet_status's");
+        assert_eq!(addresses_view(json!({"ok": true, "addresses": []}), Some(20))["unused"], 0);
     }
 
     #[test]
