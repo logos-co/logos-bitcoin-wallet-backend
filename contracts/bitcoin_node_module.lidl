@@ -1,5 +1,5 @@
 module bitcoin_node_module {
-  version "0.1.0"
+  version "0.2.0"
   depends []
 
   method list_networks() -> tstr description "`{ ok, networks }`: mainnet, testnet4 and signet, and regtest when the instance directory\nholds regtest.json."
