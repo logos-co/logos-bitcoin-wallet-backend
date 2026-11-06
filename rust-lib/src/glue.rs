@@ -110,8 +110,9 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     /// CUSTODIAN. The Tor proxy for every source: `tor` (the Tor that comes with Logos, the
     /// default) or socks5h://host:port. Refused while a wallet is open.
     fn set_proxy(&self, proxy: String) -> String;
-    /// CUSTODIAN. What Tor carries: `all`, `identifying` or `none`, for every network; it sets
-    /// `torUseChosen`. `{ ok, torUse, torUseChosen }`. Refused while a wallet is open.
+    /// CUSTODIAN. What Tor carries on the active network: `all`, `identifying` or `none`; it sets
+    /// that network's `torUseChosen`. `{ ok, network, torUse, torUseChosen }`. Refused while a
+    /// wallet is open.
     fn set_tor_use(&self, mode: String) -> String;
     /// CUSTODIAN. Clears a suspect mark in the node module and, with a wallet open, in the core.
     fn clear_suspect(&self, source_id: String) -> String;
@@ -1453,7 +1454,7 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
             return refused();
         }
         match self.settings_unlocked() {
-            Ok(_) => relay(ipc!(node(), set_tor_use_async_with_timeout, WRITE, &mode), "bitcoin_node_module"),
+            Ok(net) => relay(ipc!(node(), set_tor_use_async_with_timeout, WRITE, &net, &mode), "bitcoin_node_module"),
             Err(e) => err(e),
         }
     }
