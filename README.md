@@ -15,7 +15,7 @@ One role, the custodian set, defaults to `bitcoin_wallet_ui`. There is no approv
 
 | Who | Methods |
 |---|---|
-| custodian | `configure`, `set_active_network`, `open_wallet`, `close_wallet`, `descriptors`, `set_birthday`, `set_gap_limit`, `receive_addresses`, `set_address_label`, `set_sources`, `set_source`, `set_proxy`, `set_tor_use`, `set_own_peers`, `peer_list`, `clear_suspect`, `rebroadcast`, `abandon_send` |
+| custodian | `configure`, `set_active_network`, `open_wallet`, `close_wallet`, `descriptors`, `set_birthday`, `set_gap_limit`, `receive_addresses`, `set_address_label`, `set_sources`, `set_source`, `set_proxy`, `set_tor_use`, `set_local_sends`, `set_own_peers`, `peer_list`, `clear_suspect`, `rebroadcast`, `abandon_send` |
 | any named module | `request_send`, `request_fee_bump`, and `cancel_send` for its own request |
 | anyone | every read: `caller_identity`, `list_networks`, `list_wallets`, `job_status`, `wallet_status`, `balances`, `history`, `receive_address`, `current_address`, `fee_rates`, `address_valid`, `format_btc`, `parse_btc`, `sources`, `source_health`, `probe`, `exposure`, `send_status`, `list_sends` |
 
@@ -168,6 +168,10 @@ and in `none`). `set_tor_use(mode)` relays what Tor carries on the active networ
 it answers `{ ok, network, torUse, torUseChosen }`, and `sources` and `source_health` carry both
 for that network, so the app asks once per network, before an account there, while
 `torUseChosen` is false.
+`set_local_sends(via)` relays where the active network's payments go with your own node:
+`servers` (public Electrum servers over Tor) or `node`; it answers `{ ok, network, localSends,
+localSendsChosen, localSendsRecommended, sendServers }`, and `sources` and `source_health` carry
+that as `sends` (`localSends` null without your own node).
 `sources`, `source_health` and `probe({ network?, source })` pass the node module's rows through:
 `certSha256`, `certificate { certSha256, subject, issuer, notBefore, notAfter, trusted }`, `encrypted`
 and `userAdded`. `set_source` and `set_sources` take `certSha256` to pin a TLS server's certificate,

@@ -114,6 +114,10 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     /// that network's `torUseChosen`. `{ ok, network, torUse, torUseChosen }`. Refused while a
     /// wallet is open.
     fn set_tor_use(&self, mode: String) -> String;
+    /// CUSTODIAN. With your own node, where the active network's payments go: `servers` (public
+    /// Electrum servers over Tor) or `node`. `{ ok, network, localSends, localSendsChosen,
+    /// localSendsRecommended, sendServers }`. Refused while a wallet is open.
+    fn set_local_sends(&self, via: String) -> String;
     /// CUSTODIAN. Clears a suspect mark in the node module and, with a wallet open, in the core.
     fn clear_suspect(&self, source_id: String) -> String;
     /// CUSTODIAN. `{ network, peers: [host[:port]] }`, at most 64: Kyoto's own peers, which replace the
@@ -1455,6 +1459,16 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
         }
         match self.settings_unlocked() {
             Ok(net) => relay(ipc!(node(), set_tor_use_async_with_timeout, WRITE, &net, &mode), "bitcoin_node_module"),
+            Err(e) => err(e),
+        }
+    }
+
+    fn set_local_sends(&self, via: String) -> String {
+        if !self.custodian("set_local_sends", &caller()) {
+            return refused();
+        }
+        match self.settings_unlocked() {
+            Ok(net) => relay(ipc!(node(), set_local_sends_async_with_timeout, WRITE, &net, &via), "bitcoin_node_module"),
             Err(e) => err(e),
         }
     }
