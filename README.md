@@ -163,10 +163,11 @@ network.
 `set_proxy` takes `tor`, the Tor that comes with Logos and the node module's default, or a
 `socks5h://host:port` Tor of the person's own; `source_health` passes the node module's `tor`
 through (the built-in Tor's `{ state, progress, detail, socks, answered }`, null for one's own
-and in `none`). `set_tor_use(mode)` relays what Tor carries, for every network: `all`,
+and in `none`). `set_tor_use(mode)` relays what Tor carries on the active network: `all`,
 `identifying` (Kyoto's headers and filters direct, matched blocks and sends over Tor) or `none`;
-it answers `{ ok, torUse, torUseChosen }`, and `sources` and `source_health` carry both, so the
-app asks once, before the first account, while `torUseChosen` is false.
+it answers `{ ok, network, torUse, torUseChosen }`, and `sources` and `source_health` carry both
+for that network, so the app asks once per network, before an account there, while
+`torUseChosen` is false.
 `sources`, `source_health` and `probe({ network?, source })` pass the node module's rows through:
 `certSha256`, `certificate { certSha256, subject, issuer, notBefore, notAfter, trusted }`, `encrypted`
 and `userAdded`. `set_source` and `set_sources` take `certSha256` to pin a TLS server's certificate,
