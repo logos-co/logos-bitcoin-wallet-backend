@@ -1406,6 +1406,14 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
                 v["wallet"] = w;
             }
         }
+        // The node in Logos, on networks that list it: whether it runs here and how far it has
+        // synced, so the app can say "stopped" or "syncing, block X of Y" and send the person to
+        // the Bitcoin Node app, which starts it. Absent when the node module could not say.
+        if has_local_source(&v) {
+            if let Ok(l) = ipc!(node(), local_node_async_with_timeout, READ, &network).and_then(|s| parse(s, "node module")) {
+                v["localNode"] = l;
+            }
+        }
         v.to_string()
     }
 
@@ -1700,4 +1708,9 @@ impl AboutToUnload for BitcoinWalletBackendModuleImpl {
 #[no_mangle]
 pub extern "Rust" fn logos_module_install() {
     logos_install!(BitcoinWalletBackendModuleImpl);
+}
+
+/// Whether a source_health reply lists the node in Logos.
+fn has_local_source(v: &serde_json::Value) -> bool {
+    v["sources"].as_array().is_some_and(|a| a.iter().any(|s| s["kind"] == "local"))
 }
