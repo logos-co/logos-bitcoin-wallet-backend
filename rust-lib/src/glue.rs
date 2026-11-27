@@ -96,7 +96,10 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     fn sources(&self) -> String;
     /// The node module's source health (with `tor`, the built-in Tor's state while it is the
     /// proxy and Tor is used, and `torUse`, `torUseChosen`), plus `wallet`, the open wallet's own
-    /// view of them.
+    /// view of them, and on a network that lists the node in Logos (a source of kind "local"),
+    /// `localNode`: the node module's `local_node` reply, `{ ok, network, enabled, available,
+    /// status?, error? }`. `localNode` is in this call's reply only, not in the node module's
+    /// `source_health_changed` events.
     fn source_health(&self) -> String;
     /// `{ network?, source }`: the node module probes that source now, or every enabled server for "",
     /// within 15 s; a TLS server's row carries `certificate`.
@@ -1406,6 +1409,14 @@ impl BitcoinWalletBackendModule for BitcoinWalletBackendModuleImpl {
                 v["wallet"] = w;
             }
         }
+        // The node in Logos, on networks that list it: whether it runs here and how far it has
+        // synced, so the app can say "stopped" or "syncing, block X of Y" and send the person to
+        // the Bitcoin Node app, which starts it. Absent when the node module could not say.
+        if view::has_local_source(&v) {
+            if let Ok(l) = ipc!(node(), local_node_async_with_timeout, READ, &network).and_then(|s| parse(s, "node module")) {
+                v["localNode"] = l;
+            }
+        }
         v.to_string()
     }
 
@@ -1701,3 +1712,4 @@ impl AboutToUnload for BitcoinWalletBackendModuleImpl {
 pub extern "Rust" fn logos_module_install() {
     logos_install!(BitcoinWalletBackendModuleImpl);
 }
+

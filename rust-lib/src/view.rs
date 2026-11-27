@@ -119,9 +119,23 @@ pub fn history_view(mut h: Value) -> Value {
     h
 }
 
+/// Whether a source_health reply lists the node in Logos (a source of kind "local").
+pub fn has_local_source(v: &Value) -> bool {
+    v["sources"].as_array().is_some_and(|a| a.iter().any(|s| s["kind"] == "local"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_source_only_when_listed() {
+        assert!(has_local_source(&json!({"sources": [{"kind": "esplora"}, {"kind": "local"}]})));
+        assert!(!has_local_source(&json!({"sources": [{"kind": "esplora"}, {"kind": "kyoto"}]})));
+        assert!(!has_local_source(&json!({"sources": []})));
+        assert!(!has_local_source(&json!({"wallet": {}})), "no sources list");
+        assert!(!has_local_source(&json!({"sources": "local"})), "not an array");
+    }
 
     #[test]
     fn absent_heights_are_no_percentage() {
