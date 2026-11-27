@@ -172,6 +172,9 @@ for that network, so the app asks once per network, before an account there, whi
 `servers` (public Electrum servers over Tor) or `node`; it answers `{ ok, network, localSends,
 localSendsChosen, localSendsRecommended, sendServers }`, and `sources` and `source_health` carry
 that as `sends` (`localSends` null without your own node).
+On a network that lists the node in Logos (a source of kind `local`), `source_health` also
+carries `localNode`, the node module's `local_node` reply: `{ ok, network, enabled, available,
+status?, error? }`. It is in the call's reply only, not in `source_health_changed` events.
 `sources`, `source_health` and `probe({ network?, source })` pass the node module's rows through:
 `certSha256`, `certificate { certSha256, subject, issuer, notBefore, notAfter, trusted }`, `encrypted`
 and `userAdded`. `set_source` and `set_sources` take `certSha256` to pin a TLS server's certificate,

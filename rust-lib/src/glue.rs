@@ -96,7 +96,10 @@ pub trait BitcoinWalletBackendModule: Send + Sync + 'static {
     fn sources(&self) -> String;
     /// The node module's source health (with `tor`, the built-in Tor's state while it is the
     /// proxy and Tor is used, and `torUse`, `torUseChosen`), plus `wallet`, the open wallet's own
-    /// view of them.
+    /// view of them, and on a network that lists the node in Logos (a source of kind "local"),
+    /// `localNode`: the node module's `local_node` reply, `{ ok, network, enabled, available,
+    /// status?, error? }`. `localNode` is in this call's reply only, not in the node module's
+    /// `source_health_changed` events.
     fn source_health(&self) -> String;
     /// `{ network?, source }`: the node module probes that source now, or every enabled server for "",
     /// within 15 s; a TLS server's row carries `certificate`.
